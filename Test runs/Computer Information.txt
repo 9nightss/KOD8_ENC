@@ -1,0 +1,102 @@
+Computer Information:
+Manufacturer: HP
+Model: Victus by HP Gaming Laptop 15-fa1xxx
+No Touch Input Detected
+Processor Information:
+CPU Vendor: GenuineIntel
+CPU Brand: 13th Gen Intel(R) Core(TM) i5-13500H
+CPU Family: 0x6
+CPU Model: 0xba
+CPU Stepping: 0x2
+CPU Type: 0x0
+Speed: 3187 MHz
+16 logical processors
+12 physical processors
+Hyper-threading: Supported
+FCMOV: Unsupported
+SSE2: Supported
+SSE3: Supported
+SSSE3: Supported
+SSE4a: Unsupported
+SSE41: Supported
+SSE42: Supported
+AES: Supported
+AVX: Supported
+AVX2: Supported
+AVX512F: Unsupported
+AVX512PF: Unsupported
+AVX512ER: Unsupported
+AVX512CD: Unsupported
+AVX512VNNI: Unsupported
+SHA: Supported
+CMPXCHG16B: Supported
+LAHF/SAHF: Supported
+PrefetchW: Unsupported
+BMI1: Supported
+BMI2: Supported
+F16C: Supported
+FMA: Supported
+Operating System:
+Windows 11 (64 bit)
+NTFS: Supported
+Client Information:
+Version: 1766451605
+Browser GPU Acceleration Status: Enabled
+Browser Canvas: Enabled
+Browser Canvas out-of-process rasterization: Enabled
+Browser Direct Rendering Display Compositor: Disabled
+Browser Compositing: Enabled
+Browser Multiple Raster Threads: Enabled
+Browser OpenGL: Enabled
+Browser Rasterization: Enabled
+Browser Raw Draw: Disabled
+Browser Skia Graphite: Disabled
+Browser Video Decode: Enabled
+Browser Video Encode: Enabled
+Browser Vulkan: Disabled
+Browser WebGL: Enabled
+Browser WebGL2: Enabled
+Browser WebGPU: Enabled
+Browser WebNN: Disabled
+Video Card:
+Driver: NVIDIA GeForce RTX 3050 6GB Laptop GPU
+DirectX Driver Name: nvldumdx.dll
+Driver Version: 32.0.15.7703
+DirectX Driver Version: 32.0.15.7703
+Driver Date: 7 28 2025
+Desktop Color Depth: 32 bits per pixel
+Monitor Refresh Rate: 144 Hz
+DirectX Card: NVIDIA GeForce RTX 3050 6GB Laptop GPU
+VendorID: 0x10de
+DeviceID: 0x25ac
+Revision: 0xa1
+Number of Monitors: 1
+Number of Logical Video Cards: 1
+No SLI or Crossfire Detected
+Primary Display Resolution: 1920 x 1080
+Desktop Resolution: 1920 x 1080
+Primary Display Size: 13.54" x 7.60" (15.51" diag), 34.4cm x 19.3cm (39.4cm diag)
+Primary Bus: PCI Express 8x
+Primary VRAM: 6143 MB
+Supported MSAA Modes: 2x 4x 8x
+Sound card:
+Audio device: Headphones (TWS.)
+Memory:
+RAM: 32408 Mb
+VR Hardware:
+VR Headset: None detected
+No VR configuration with trackers detected
+Most number of trackers in a session: 0
+Miscellaneous:
+UI Language: English
+Media Type: Undetermined
+Total Hard Disk Space Available: 952868 MB
+Largest Free Hard Disk Block: 189873 MB
+Game Controller: None detected
+MAC Address hash: f48ceb66c1e933a6bec16276d9e952fb827b13ac
+Storage:
+Disk serial number hash: 299a9804
+Number of SSDs: 1
+SSD sizes: 1000G
+Number of HDDs: 0
+Number of removable drives: 0
