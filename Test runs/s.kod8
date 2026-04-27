@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE root SYSTEM "Parameters.dtd">
+<root batch_name="BatchDataExchange" user="" password="" env="" version="5 24 7 0 02-26-2016.22.00" licfile="" >
+<inputParameters>
+<file id="FileToProcess" destination="" filePath="C:\Users\ab_fa\OneDrive\Documents\TEKNO TASARIM\RS\salgi_komple_datalar\Salgi CATIA\RS_DYRK_00_DYRK_DINAMIK_SALGI_OLCUM_EKIPMANI.igs" type="bin" upLoadable="RightNow" automatic="1"/>
+<file id="FileToProcess" destination="" filePath="C:\Users\ab_fa\OneDrive\Documents\TEKNO TASARIM\RS\salgi_komple_datalar\Salgi Solid\RS_DYRK_00_DYRK_DINAMIK_SALGI_OLCUM_EKIPMANI_4202037.STEP" type="bin" upLoadable="RightNow" automatic="1"/>
+</inputParameters>
+<outputParameters>
+<folder id="OutputFolder" destination="C:\Users\ab_fa\OneDrive\Documents\TEKNO TASARIM\RS\salgi_komple_datalar\Salgi CATIA" folderPath="C:\Users\ab_fa\OneDrive\Documents\TEKNO TASARIM\RS\salgi_komple_datalar\Salgi CATIA" type="bin" upLoadable="RightNow" extension="*" automatic="1"/>
+<simple_arg id="OutputExtension1" value="CATPart/CATProduct"/>
+<folder id="OutputFolder" destination="C:\Users\ab_fa\OneDrive\Documents\TEKNO TASARIM\RS\salgi_komple_datalar\Salgi CATIA\output" folderPath="C:\Users\ab_fa\OneDrive\Documents\TEKNO TASARIM\RS\salgi_komple_datalar\Salgi CATIA\output" type="bin" upLoadable="RightNow" extension="*" automatic="1"/>
+<simple_arg id="OutputExtension2" value="CATPart/CATProduct"/>
+</outputParameters>
+<PCList>
+<PC name="_MD2.slt+" />
+<PC name="_MD1.slt+" />
+<PC name="WS1.prd" />
+<PC name="PDG.prd" />
+<PC name="IG1.prd" />
+<PC name="ID1.prd" />
+<PC name="GDR.prd" />
+<PC name="CC1.prd" />
+<PC name="ASD.prd" />
+</PCList>
+</root>
