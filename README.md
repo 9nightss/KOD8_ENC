@@ -89,4 +89,4 @@ To ensure 100% reversibility without data corruption, the engine enforces strict
 
 License
 
-This project is provided for educational and obfuscation purposes. For high-security production environments, always use industry-standard audited protocols (like AES-256 or ChaCha20).
+This project is provided for educational and obfuscation purposes.
