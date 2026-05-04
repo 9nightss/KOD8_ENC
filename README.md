@@ -1,6 +1,6 @@
 # KOD8_ENC
 
-KOD 8 PRO is a multi-layered obfuscation and encryption engine designed for high-diffusion data protection. Unlike standard single-algorithm ciphers, KOD 8 utilizes a Strategic Chain Architecture, applying exactly eight distinct, reversible transformations based on the detected or specified input type.
+KOD 8 is a multi-layered obfuscation and encryption engine designed for high-diffusion data protection. Unlike standard single-algorithm ciphers, KOD 8 utilizes a Strategic Chain Architecture, applying exactly eight distinct, reversible transformations based on the detected or specified input type.
 
 More Features
 
