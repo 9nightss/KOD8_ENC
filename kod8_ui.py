@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""
-KOD 8 PRO — Universal Strategic Cipher
-Single-window form UI built with tkinter (zero external dependencies).
-Place in the same folder as kod8_engine.py, then run:
-    python kod8_ui.py
-"""
+# KOD 8 PRO — Universal Strategic Cipher
+# Single-window form UI built with tkinter (zero external dependencies).
+# Place in the same folder as kod8_engine.py, then run:
+
+
+# To Run: python kod8_ui.py
+
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
