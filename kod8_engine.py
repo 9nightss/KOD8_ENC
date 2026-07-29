@@ -2,7 +2,7 @@ import base64
 import math
 
 # =============================================================================
-# KOD 8 — CIPHER ENGINE v2.0
+# KOD 8 — ANTI-LLM AND DECODING AGENT BASED CIPHER MODEL
 # =============================================================================
 #
 # Architecture:
@@ -57,18 +57,9 @@ for _i, _v in enumerate(_SBOX):
 # =============================================================================
 
 def op_hex(text: str, encrypt: bool, **_) -> str:
-    """
-    HEX ENCODE / DECODE
-    -------------------
-    Encrypt: converts every character to its UTF-8 hex representation.
-        "Hi" → UTF-8 bytes [0x48, 0x69] → "4869" (uppercased)
-    Decrypt: reads pairs of hex digits and decodes them back to UTF-8 text.
+#    HEX ENCODE / DECODE
 
-    Why it's here: normalises arbitrary unicode/binary input into a clean
-    printable ASCII character set (0-9, A-F) so all downstream ops work
-    safely without breaking on null bytes or control characters.
-    Output guarantee (R1): pure uppercase hex — 0-9 and A-F only.
-    """
+
     if encrypt:
         return text.encode("utf-8").hex().upper()
     try:
@@ -78,18 +69,9 @@ def op_hex(text: str, encrypt: bool, **_) -> str:
 
 
 def op_base64(text: str, encrypt: bool, **_) -> str:
-    """
-    BASE64 ENCODE / DECODE
-    ----------------------
-    Encrypt: encodes raw bytes (interpreted as latin-1) into a Base64 string.
-        Binary data → safe ASCII:  A-Z, a-z, 0-9, +, /, =
-    Decrypt: decodes Base64 string back to the original byte sequence.
 
-    Why it's here: essential for image/video lists where the input is raw
-    binary — Base64 makes any binary payload fully printable and ensures every
-    subsequent op works on a uniform, well-defined character set (R2).
-    Output guarantee (R2): base64 alphabet only — safe to feed into any op.
-    """
+#    BASE64 ENCODE / DECODE (why not give them some hope)
+
     if encrypt:
         return base64.b64encode(text.encode("latin-1", errors="replace")).decode("ascii")
     try:
@@ -99,19 +81,9 @@ def op_base64(text: str, encrypt: bool, **_) -> str:
 
 
 def op_xor_key(text: str, encrypt: bool, **_) -> str:
-    """
-    XOR WITH KEY BYTE  (self-inverse)
-    ----------------------------------
-    Encrypt = Decrypt: XOR every character's ordinal with the integer value of
-    the first key digit.  KOD8_KEY[0] = '8', so the mask byte is 8.
+#    XOR WITH KEY BYTE  (self-inverse)
 
-        chr(ord('A') ^ 8) = chr(65 ^ 8) = chr(73) = 'I'
-        chr(ord('I') ^ 8) = chr(73 ^ 8) = chr(65) = 'A'  ← same op inverts it
 
-    Because XOR is self-inverse, the encrypt and decrypt paths are identical
-    — the engine just calls this with either flag and the result is the same.
-    Does not change string length.  Safe at any chain position.
-    """
     key_byte = int(KOD8_KEY[0])
     # Skip chars with ord > 255 — XOR result would be unrecoverable
     return "".join(
@@ -121,23 +93,9 @@ def op_xor_key(text: str, encrypt: bool, **_) -> str:
 
 
 def op_rolling_xor(text: str, encrypt: bool, **_) -> str:
-    """
-    ROLLING XOR  (CBC byte-mode)
-    ----------------------------
-    Encrypt: XOR each character with the PREVIOUS OUTPUT character (chained).
-        seed   = int(KOD8_KEY[0]) = 8              ← initialisation vector
-        out[0] = chr(ord(in[0]) ^ seed)
-        out[i] = chr(ord(in[i]) ^ ord(out[i-1]))   for i > 0
 
-    Decrypt: undo the chain by XORing each ciphertext byte with the previous
-    CIPHERTEXT byte (which is already known), so decryption can go forward:
-        in[0] = chr(ord(out[0]) ^ seed)
-        in[i] = chr(ord(out[i]) ^ ord(out[i-1]))
+#    ROLLING XOR  (CBC byte-mode)
 
-    Why it's here: DIFFUSION — a single changed character cascades through
-    every subsequent output character.  Unlike plain XOR, identical input
-    blocks produce different ciphertext blocks.  Safe anywhere in chain.
-    """
     if not text:
         return text
     seed, result = int(KOD8_KEY[0]), []
@@ -162,24 +120,9 @@ def op_rolling_xor(text: str, encrypt: bool, **_) -> str:
 
 
 def op_keystream_xor(text: str, encrypt: bool, **_) -> str:
-    """
-    KEY STREAM XOR  (self-inverse)
-    ------------------------------
-    Encrypt = Decrypt: generates a pseudo-random byte stream from KOD8_KEY
-    using a Linear Congruential Generator (LCG), then XORs each character
-    with the next byte of the stream.
 
-        seed  = int(KOD8_KEY)  = 86247931
-        seed  = (seed × 1103515245 + 12345) mod 2^31   ← LCG step
-        byte  = seed mod 256
-        out_i = chr(ord(in_i) ^ byte_i)
+#    KEY STREAM XOR  (self-inverse)
 
-    The PRNG is deterministic — same key always produces the same stream,
-    so the XOR is self-inverse.
-
-    Why it's here: every position gets a UNIQUE XOR byte, destroying long
-    repeating patterns (e.g. video frame data).  Safe anywhere in chain.
-    """
     seed, result = int(KOD8_KEY), []
     for c in text:
         seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
@@ -191,24 +134,10 @@ def op_keystream_xor(text: str, encrypt: bool, **_) -> str:
 
 
 def op_vigenere_tr(text: str, encrypt: bool, **_) -> str:
-    """
-    VIGENERE CIPHER — TURKISH ALPHABET
-    ------------------------------------
-    Encrypt: for each character that belongs to TURKISH_ALPHA, shift it
-    forward by the key digit at (key_pos mod 8), where key_pos only
-    increments on Turkish-alpha characters.
-        new_idx = (current_idx + shift) mod len(TURKISH_ALPHA)
 
-    Decrypt: shift backward by the same amount.
-        new_idx = (current_idx − shift) mod len(TURKISH_ALPHA)
+#    VIGENERE CIPHER — TURKISH ALPHABET
 
-    Non-TURKISH_ALPHA characters pass through UNCHANGED (R3).
 
-    Why it's here: polyalphabetic substitution — shift amount varies by
-    position, defeating frequency analysis on the Turkish alphabet.
-    Prerequisite: input must be uppercase (R6) — only uppercase Turkish
-    letters are in TURKISH_ALPHA.
-    """
     result, key_pos = [], 0
     for c in text:
         if c in TURKISH_ALPHA:
@@ -223,20 +152,9 @@ def op_vigenere_tr(text: str, encrypt: bool, **_) -> str:
 
 
 def op_atbash_tr(text: str, encrypt: bool, **_) -> str:
-    """
-    ATBASH — TURKISH ALPHABET MIRROR  (self-inverse)
-    -------------------------------------------------
-    Encrypt = Decrypt: maps each Turkish letter to its mirror position.
-        index i  →  len(TURKISH_ALPHA) − 1 − i
-        'A' (idx 0) ↔ 'Z' (last idx),  'B' ↔ 'Y',  etc.
 
-    Applying it twice returns the original.
-    Non-TURKISH_ALPHA characters pass through UNCHANGED (R3).
+#    ATBASH — TURKISH ALPHABET MIRROR  (self-inverse) (turkish because fuck you)
 
-    Why it's here: zero-key substitution layer.  Without knowing the Turkish
-    alphabet ordering (Ç, Ğ, İ, Ö, Ş, Ü positions), an attacker cannot
-    reverse this step.  Prerequisite: input uppercase (R6).
-    """
     result = []
     for c in text:
         if c in TURKISH_ALPHA:
@@ -247,33 +165,10 @@ def op_atbash_tr(text: str, encrypt: bool, **_) -> str:
 
 
 def op_unicode_shift(text: str, encrypt: bool, **_) -> str:
-    """
-    UNICODE CODEPOINT SHIFT  (+5 encrypt / −5 decrypt)
-    ---------------------------------------------------
-    Encrypt: add 5 to every character's Unicode codepoint, wrapping at 256.
-        ord('0') = 48 → 53 = '5'
-        ord('A') = 65 → 70 = 'F'
-    Decrypt: subtract 5 (mod 256).
 
-    Chain position constraint (R4): this op MUST NOT be placed BEFORE
-    op_atbash_tr or op_vigenere_tr in the same chain when Turkish-alphabet
-    characters may be present in the stream.  (+5 mod 256) on a Turkish char
-    like 'Ğ' produces a codepoint not in TURKISH_ALPHA, which those ops then
-    pass through unchanged — breaking the round-trip.
+#    UNICODE CODEPOINT SHIFT  (+5 encrypt / −5 decrypt)
 
-    Safe positions: immediately after op_hex or op_base64 (whose outputs are
-    guaranteed non-Turkish), or as the final substitution when no Turkish-alpha
-    ops follow.
 
-    Why it's here: shifts hex digits (0-9, A-F) out of their recognisable
-    range so the intermediate output no longer looks like hex encoding.
-
-    Safety net: Turkish letters like 'İ' (U+0130=304) and 'Ğ' (U+011E=286)
-    have codepoints > 255. Applying (+5 mod 256) to them is irreversible since
-    (304+5)%256=53 but (53-5)=48 which is '0' not 'İ'. This op therefore SKIPS
-    any character with ord(c) > 127. When placed after op_hex/op_base64 (pure
-    7-bit ASCII) the skip never fires — it is a defensive guard only.
-    """
     delta = 5 if encrypt else -5
     return "".join(
         chr((ord(c) + delta) % 256) if ord(c) <= 127 else c
@@ -282,24 +177,9 @@ def op_unicode_shift(text: str, encrypt: bool, **_) -> str:
 
 
 def op_sbox(text: str, encrypt: bool, **_) -> str:
-    """
-    S-BOX BYTE SUBSTITUTION
-    -----------------------
-    Encrypt: replace each character's ordinal with _SBOX[ordinal].
-        'A' (65) → _SBOX[65]  (pseudo-random scrambled value)
-    Decrypt: use the precomputed inverse _SBOX_INV.
-        _SBOX_INV[_SBOX[65]] = 65  → 'A'
 
-    The S-box is a fixed bijective permutation of 0–255, generated once from
-    KOD8_KEY using Fisher-Yates at import time.  Every input byte maps to
-    exactly one output byte — fully reversible.
+#    S-BOX BYTE SUBSTITUTION
 
-    Why it's here: non-linear byte substitution.  The pseudo-random permutation
-    destroys any algebraic relationship between input and output — the strongest
-    single substitution primitive in KOD8.  Safe anywhere in chain.
-    """
-    # Skip chars with codepoint > 255 — their ord % 256 loses information
-    # and the inverse cannot recover the original (e.g. İ=304, Ğ=286).
     table = _SBOX if encrypt else _SBOX_INV
     return "".join(
         chr(table[ord(c)]) if ord(c) <= 255 else c
@@ -308,25 +188,9 @@ def op_sbox(text: str, encrypt: bool, **_) -> str:
 
 
 def op_rail_fence(text: str, encrypt: bool, rails: int = 3, **_) -> str:
-    """
-    RAIL FENCE TRANSPOSITION
-    ------------------------
-    Encrypt: write text in a zigzag across `rails` rails, read each rail
-    left-to-right.
 
-        "HELLOWORLD"  rails=3:
-        Rail 0: H . . . O . . . L .   →  "HOL"
-        Rail 1: . E . L . W . R . D   →  "ELWRD"
-        Rail 2: . . L . . . O . . .   →  "LO"
-        Cipher: "HOL" + "ELWRD" + "LO"  =  "HOLELWRDLO"
+#    RAIL FENCE TRANSPOSITION
 
-    Decrypt: reconstruct the zigzag pattern, slice ciphertext into per-rail
-    segments by count, then re-interleave in zigzag order.
-
-    Why it's here: positional transposition — characters keep their values
-    but move to new positions.  Larger `rails` = more dispersed shuffle.
-    Safe at any chain position — moves chars, does not change values.
-    """
     n = len(text)
     if n == 0 or rails < 2:
         return text
@@ -362,78 +226,32 @@ def op_rail_fence(text: str, encrypt: bool, rails: int = 3, **_) -> str:
 
 
 def op_block_rotate(text: str, encrypt: bool, n: int = 3, **_) -> str:
-    """
-    BLOCK ROTATION  (circular shift by N)
-    --------------------------------------
-    Encrypt: move the first N characters to the END.
-        "ABCDEFGH"  n=3  →  "DEFGHABC"
-    Decrypt: move the last N characters back to the FRONT.
-        "DEFGHABC"  n=3  →  "ABCDEFGH"
+#    BLOCK ROTATION  (circular shift by N)
 
-    Why it's here: lightweight transposition — cheap to compute, ensures the
-    first N plaintext chars never appear at the start of ciphertext.  `n` is
-    fixed per CipherList.  Safe at any chain position.
-    """
     if len(text) <= n:
         return text
     return (text[n:] + text[:n]) if encrypt else (text[-n:] + text[:-n])
 
 
 def op_split_reverse(text: str, encrypt: bool, **_) -> str:
-    """
-    SPLIT + DOUBLE REVERSE  (self-inverse)
-    ----------------------------------------
-    Encrypt = Decrypt: split at midpoint, reverse each half, concatenate.
 
-        "ABCDEFGH"  →  "ABCD" + "EFGH"  →  "DCBA" + "HGFE"  →  "DCBAHGFE"
+#    SPLIT + DOUBLE REVERSE  (self-inverse)
 
-    Applying twice restores original (self-inverse).
-
-    Why it's here: positional scramble with no key dependency.  Harder to
-    spot than a full reverse — both halves are independently inverted.
-    Safe at any chain position — moves chars, does not change values.
-    """
     mid = len(text) // 2
     return text[:mid][::-1] + text[mid:][::-1]
 
 
 def op_full_reverse(text: str, encrypt: bool, **_) -> str:
-    """
-    FULL REVERSE  (self-inverse)
-    ----------------------------
-    Encrypt = Decrypt: reverse the entire string.
-        "HELLO" → "OLLEH"  (same op applied again → "HELLO")
 
-    Why it's here: cheap outer shell.  The first/last chars of plaintext
-    become the last/first of ciphertext, defeating header/footer pattern
-    recognition.  Safe at any chain position.
-    """
+#    REVERSE THE STRING 
+
     return text[::-1]
 
 
 def op_columnar(text: str, encrypt: bool, cols: int = None, **_) -> str:
-    """
-    COLUMNAR TRANSPOSITION
-    -----------------------
-    Encrypt: write text row-by-row into a grid of `cols` columns, then
-    read out column-by-column (left to right).
 
-        "ATTACKATDAWN"  cols=4:
-        Grid:  A T T A         Read cols:
-               C K A T   →     "ACD" + "TKA" + "TAW" + "ATN"
-               D A W N         =  "ACDTKATAWAT N"
+#    COLUMNAR TRANSPOSITION
 
-    Decrypt: know `cols`, reconstruct column lengths, fill grid
-    column-by-column with the ciphertext, read row-by-row.
-    Padding (null bytes) fills the last row on encrypt and is stripped
-    on decrypt.
-
-    `cols` defaults to (sum of key digits mod 5) + 4  →  always 4–8.
-
-    Why it's here: strong positional scramble for longer inputs — every
-    character moves by its column index.  Destroys sequential structure
-    (doc paragraphs, video frame headers).  Safe at any chain position.
-    """
     if cols is None:
         cols = (sum(int(d) for d in KOD8_KEY) % 5) + 4   # 4–8 columns
 
@@ -467,25 +285,25 @@ def op_columnar(text: str, encrypt: bool, cols: int = None, **_) -> str:
 
 
 def op_block_shuffle(text: str, encrypt: bool, block_size: int = 8, **_) -> str:
-    """
-    BLOCK SHUFFLE  (key-derived permutation)
-    -----------------------------------------
-    Encrypt: divide the string into blocks of `block_size` chars, reorder
-    blocks by a permutation derived from KOD8_KEY.
+    #
+    #BLOCK SHUFFLE  (key-derived permutation)
+    #-----------------------------------------
+    #Encrypt: divide the string into blocks of `block_size` chars, reorder
+    #blocks by a permutation derived from KOD8_KEY.
 
-        Key digits "86247931" → raw positions [8,6,2,4,7,9,3,1].
-        Reduce mod num_blocks, deduplicate (first-seen), fill remaining
-        indices in ascending order to complete the permutation.
+    #    Key digits "86247931" → raw positions [8,6,2,4,7,9,3,1].
+    #    Reduce mod num_blocks, deduplicate (first-seen), fill remaining
+    #    indices in ascending order to complete the permutation.
 
-    Decrypt: compute the inverse permutation and reorder back.
+    # Decrypt: compute the inverse permutation and reorder back.
 
-    Last block null-padded to `block_size` if needed; padding stripped on
-    decrypt.
+    #Last block null-padded to `block_size` if needed; padding stripped on
+    #decrypt.
 
-    Why it's here: block-level transposition — moves entire 8-char chunks,
-    destroying file-format structure that spans large byte ranges (JPEG
-    headers, PDF cross-reference tables).  Safe at any chain position.
-    """
+    #Why it's here: block-level transposition — moves entire 8-char chunks,
+    #destroying file-format structure that spans large byte ranges (JPEG
+    #headers, PDF cross-reference tables).  Safe at any chain position.
+
     if not text:
         return text
 
@@ -516,27 +334,27 @@ def op_block_shuffle(text: str, encrypt: bool, block_size: int = 8, **_) -> str:
 
 
 def op_block_xor_cbc(text: str, encrypt: bool, block_size: int = 8, **_) -> str:
-    """
-    BLOCK XOR CASCADE  (CBC-mode inspired)
-    ----------------------------------------
-    Encrypt: divide into blocks of `block_size` chars, XOR each block with
-    the PREVIOUS ENCRYPTED block before storing.
 
-        IV  = KOD8_KEY repeated/truncated to `block_size`  →  "86247931"
-        B0' = XOR(B0, IV)
-        B1' = XOR(B1, B0')   ← chain on previous CIPHERTEXT block
-        B2' = XOR(B2, B1')  …
+#    BLOCK XOR CASCADE  (CBC-mode inspired)
+#   ----------------------------------------
+#    Encrypt: divide into blocks of `block_size` chars, XOR each block with
+#    the PREVIOUS ENCRYPTED block before storing.
 
-    Decrypt: XOR each ciphertext block with the previous ciphertext block
-    (which is already known), going forward through the list:
-        B0  = XOR(B0', IV)
-        B1  = XOR(B1', B0')  …
+#        IV  = KOD8_KEY repeated/truncated to `block_size`  →  "86247931"
+#        B0' = XOR(B0, IV)
+#        B1' = XOR(B1, B0')   ← chain on previous CIPHERTEXT block
+#        B2' = XOR(B2, B1')  …
 
-    Why it's here: CBC-mode diffusion at block level.  A single changed
-    character in block N corrupts all subsequent blocks — impossible to
-    surgically modify one file section without corrupting the rest.
-    Safe at any chain position — operates on ordinals only.
-    """
+#   Decrypt: XOR each ciphertext block with the previous ciphertext block
+#    (which is already known), going forward through the list:
+#        B0  = XOR(B0', IV)
+#        B1  = XOR(B1', B0')  …
+
+#    Why it's here: CBC-mode diffusion at block level.  A single changed
+#    character in block N corrupts all subsequent blocks — impossible to
+#    surgically modify one file section without corrupting the rest.
+#    Safe at any chain position — operates on ordinals only.
+
     if not text:
         return text
 
@@ -566,31 +384,13 @@ def op_block_xor_cbc(text: str, encrypt: bool, block_size: int = 8, **_) -> str:
 
 
 def op_base36(text: str, encrypt: bool, **_) -> str:
-    """
-    BASE-36 DIGIT SUBSTITUTION
-    ---------------------------
-    Operates ONLY on digit characters (0-9); all other characters pass
-    through UNCHANGED — the op is position-stable and fully reversible.
 
-    Encrypt: map each digit to a base-36 symbol by adding the corresponding
-    key digit and wrapping mod 36.
-        BASE36 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        digit '7' at key_pos 0  →  shift = int('8') = 8
-        new_val = (7 + 8) mod 36 = 15  →  BASE36[15] = 'F'
+#    BASE-36 DIGIT SUBSTITUTION
 
-    Decrypt: for characters that are uppercase letters A-Z (produced by
-    encrypt when new_val ≥ 10) — reverse the shift.  For characters that
-    are still digits (new_val < 10) — also reverse the shift.
-    key_pos increments only on transformed (digit) chars so the key schedule
-    stays aligned between encrypt and decrypt.
-
-    Why it's here: destroys decimal patterns FIRST.  JSON/CSV is full of
-    numbers — making them unrecognisable before any other op defeats attempts
-    to guess values from partial ciphertext.
-    """
     # Encrypt: digits map to LOWERCASE base-36 symbols (0-9 then a-z).
     # Passthrough non-digits stay as-is (uppercase after R6 .upper()).
     # Decrypt: LOWERCASE chars are unambiguously former digits; uppercase = passthrough.
+
     BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
     result, key_pos = [], 0
 
@@ -624,28 +424,37 @@ def op_base36(text: str, encrypt: bool, **_) -> str:
 # =============================================================================
 
 def _detect_image(t: str) -> bool:
-    """Detect Base64-encoded image by magic-byte prefix."""
+
+# Detect Base64-encoded image by magic-byte prefix.
+
     return any(t.startswith(p) for p in (
         "iVBORw0KGgo", "/9j/", "UklGR", "R0lGOD", "Qk0"))
 
 def _detect_video(t: str) -> bool:
-    """Detect Base64-encoded video by magic-byte prefix."""
+
+# Detect Base64-encoded video by magic-byte prefix.
+
     return any(t.startswith(p) for p in ("AAAB", "GkXf", "AAAA"))
 
 def _detect_document(t: str) -> bool:
-    """PDF/DOCX Base64 prefix, or long prose."""
+
+# PDF/DOCX Base64 prefix, or long prose.
+  
     if t.startswith("JVBERi0") or t.startswith("PK"):
         return True
     words = t.split()
     return len(words) > 20 and sum(c.isalpha() for c in t) / max(len(t), 1) > 0.5
 
 def _detect_numeric(t: str) -> bool:
-    """High ratio of digits/data-punctuation or JSON/CSV start token."""
+
+# High ratio of digits/data-punctuation or JSON/CSV start token.
+  
     ratio = sum(c.isdigit() or c in ".,+-eE[]{}:" for c in t) / max(len(t), 1)
     return ratio > 0.45 or t.lstrip().startswith(("{", "["))
 
 def _detect_text(t: str) -> bool:
-    """Plain printable text that isn't mostly digits."""
+# Plain printable text that isn't mostly digits.
+
     if not t:
         return False
     return (sum(c.isprintable() for c in t) / max(len(t), 1) > 0.85 and
@@ -653,15 +462,9 @@ def _detect_text(t: str) -> bool:
 
 
 def auto_detect(text: str) -> str:
-    """
-    AUTO-DETECT CIPHER LIST
-    ------------------------
-    Runs each detector in priority order; returns the first matching ID.
-    Priority: image > video > document > numeric > plain text > experimental.
 
-    The caller MUST store the returned cipher_id alongside the ciphertext —
-    it is required for decryption and cannot be recovered from the ciphertext.
-    """
+#    AUTO-DETECT CIPHER LIST
+
     for cid, check in [
         ("CL2", _detect_image),
         ("CL3", _detect_video),
@@ -841,19 +644,19 @@ CIPHER_LISTS = {
 
 class Kod8:
     def __init__(self, cipher_id: str = None):
-        """
-        cipher_id : one of "CL1"–"CL6", or None for auto-detection.
-        When None the cipher is selected by analysing the input at encrypt
-        time.  The chosen ID is returned with the ciphertext and MUST be
-        supplied to decrypt().
-        """
+
+    #    cipher_id : one of "CL1"–"CL6", or None for auto-detection.
+    #    When None the cipher is selected by analysing the input at encrypt
+    #    time.  The chosen ID is returned with the ciphertext and MUST be
+    #    supplied to decrypt().
+       
         self.cipher_id = cipher_id
 
     def encrypt(self, plaintext: str) -> tuple[str, str]:
-        """
-        Encrypt plaintext.  Returns (ciphertext, cipher_id_used).
-        Store cipher_id_used — required for decryption.
-        """
+
+    #    Encrypt plaintext.  Returns (ciphertext, cipher_id_used).
+    #    Store cipher_id_used — required for decryption.
+       
         cid    = self.cipher_id or auto_detect(plaintext)
         result = plaintext.upper()       # R6: normalise to uppercase
         for fn, kw in CIPHER_LISTS[cid]["steps"]:
@@ -861,11 +664,11 @@ class Kod8:
         return result, cid
 
     def decrypt(self, ciphertext: str, cipher_id: str) -> str:
-        """
-        Decrypt ciphertext by running the CipherList in REVERSE ORDER,
-        each step called with encrypt=False.
-        cipher_id must match the one used during encryption.
-        """
+
+        #Decrypt ciphertext by running the CipherList in REVERSE ORDER,
+        #each step called with encrypt=False.
+        #cipher_id must match the one used during encryption.
+
         result = ciphertext
         for fn, kw in reversed(CIPHER_LISTS[cipher_id]["steps"]):
             result = fn(result, encrypt=False, **kw)
