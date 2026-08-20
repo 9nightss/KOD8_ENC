@@ -1,0 +1,630 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{times}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=black,
+  urlcolor=blue,
+  pdftitle={Cryptanalysis of KOD8},
+  pdfauthor={ Fatih ULUSOY}
+}
+
+\definecolor{codebg}{RGB}{245,245,245}
+\definecolor{codekw}{RGB}{0,90,150}
+\definecolor{codestr}{RGB}{140,20,20}
+\definecolor{codecomm}{RGB}{110,110,110}
+
+\lstset{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{codekw}\bfseries,
+  commentstyle=\color{codecomm}\itshape,
+  stringstyle=\color{codestr},
+  showstringspaces=false,
+  breaklines=true,
+  frame=single,
+  framesep=4pt,
+  language=Python,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  numbersep=6pt,
+  xleftmargin=1.2em,
+  tabsize=4
+}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small Cryptanalysis of KOD8}
+\fancyhead[R]{\small \thepage}
+\renewcommand{\headrulewidth}{0.3pt}
+
+\titleformat{\section}{\normalfont\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalfont\large\bfseries}{\thesubsection}{1em}{}
+
+\title{\textbf{Structural and Empirical Cryptanalysis of KOD8:\\
+A Custom Eight-Stage Symmetric Cipher}}
+\author{ Fatih ULUSOY ULUSOY}
+\date{August 2026}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent
+KOD8 is a custom symmetric cipher that routes input through one of six
+input-type-specific ``CipherLists,'' each composing exactly eight primitive
+reversible transformations (encodings, XOR variants, classical
+substitutions, and transpositions) driven by a single eight-digit numeric
+key. This report presents a structural and empirical cryptanalysis of the
+reference implementation. We show that the cipher's advertised eight-layer
+design provides far less effective key-dependent entropy than its layer
+count suggests: several primitives ignore the key entirely, one collapses
+an eight-digit (nominally $10^{8}$) key into at most 325 distinct internal
+states, and the block-cipher-inspired CBC-style layer reuses the literal
+key string as a fixed, non-random initialization vector across every
+message. We further show that the cipher is deterministic (identical
+plaintexts always yield identical ciphertexts), unauthenticated (no
+integrity tag, with several primitives silently absorbing decoding
+errors), and that the reference application persists the selected
+CipherList identifier as a cleartext header, eliminating any uncertainty
+an attacker would otherwise face in classifying the ciphertext. A
+known-plaintext brute-force attack against the full nominal keyspace is
+implemented and benchmarked, recovering the key from a single
+plaintext/ciphertext pair for the plain-text CipherList in under 2.4 hours
+on a single CPU core using an unoptimized reference Python implementation
+— and in effectively constant time once the structural entropy collapses
+identified in this report are exploited. We conclude that KOD8 is
+correctly classified as a composite classical (product) cipher and a
+functional obfuscation layer, not as a cryptographically secure primitive,
+and we outline concrete remediations.
+\end{abstract}
+
+\tableofcontents
+
+% =====================================================================
+\section{Introduction}
+% =====================================================================
+
+KOD8 (``Kod'' — Turkish for ``code'') is a hand-designed symmetric cipher
+implemented in \texttt{kod8\_engine.py}, with a companion Tkinter
+front end, \texttt{kod8\_ui.py}, that visualizes the encryption and
+decryption process step by step. The engine's own documentation frames it
+as an ``anti-LLM and decoding agent based cipher model'' — that is, a
+scheme designed primarily to resist casual or automated pattern-based
+decoding rather than to meet a formal security definition such as
+IND-CPA or IND-CCA2.
+
+This framing matters for how the design should be evaluated. KOD8 is not
+positioned as a competitor to AES-GCM or ChaCha20-Poly1305; it is a
+personal cryptographic-engineering exercise. Evaluated on those terms it
+is a legitimate and instructive artifact: a working example of a
+\emph{product cipher} in the classical sense — a chain of substitution and
+transposition steps, in the tradition of ciphers that predate the
+computational security paradigm.
+
+The purpose of this report is to evaluate that claim rigorously. We ask
+three questions:
+
+\begin{enumerate}[leftmargin=1.6em]
+  \item How much of the nominal $10^{8}$-key\-space entropy actually
+        reaches each of the eight steps in a given CipherList?
+  \item Under a realistic threat model for how the reference
+        implementation is used (a hardcoded module-level key, and a file
+        format that stores the CipherList identifier in cleartext), what
+        does an attacker actually have to solve?
+  \item Empirically, how long does key recovery take against the
+        reference implementation?
+\end{enumerate}
+
+All findings below are derived directly from the reference source
+(\texttt{kod8\_engine.py}, \texttt{kod8\_ui.py}) and validated by
+executing the actual engine code rather than by inspection alone.
+
+% =====================================================================
+\section{System Overview}
+% =====================================================================
+
+KOD8 defines a single global key,
+
+\begin{lstlisting}
+KOD8_KEY = "86247931"
+\end{lstlisting}
+
+\sloppy
+\noindent
+an eight-character decimal string, and a fixed 29-letter Turkish alphabet
+used by two of its substitution primitives. Seventeen primitive
+operations are defined in total — two encodings
+(\texttt{op\_hex}, \texttt{op\_base64}), eight XOR/substitution
+variants (\texttt{op\_xor\_key}, \texttt{op\_rolling\_xor},
+\texttt{op\_keystream\_xor}, \texttt{op\_vigenere\_tr},
+\texttt{op\_atbash\_tr}, \texttt{op\_unicode\_shift}, \texttt{op\_sbox},
+\texttt{op\_base36}), and seven transposition/block operations
+(\texttt{op\_rail\_fence}, \texttt{op\_block\_rotate},
+\texttt{op\_split\_reverse}, \texttt{op\_full\_reverse},
+\texttt{op\_columnar}, \texttt{op\_block\_shuffle},
+\texttt{op\_block\_xor\_cbc}) — each with signature
+\texttt{op\_xxx(text, encrypt, **kwargs)} and each claimed to be
+self-contained and reversible.
+\fussy
+
+Six \emph{CipherLists} (CL1–CL6) each select exactly eight of these
+primitives, in a fixed order, keyed to an input type inferred by a
+heuristic auto-detector (\texttt{auto\_detect}): plain text, image,
+video, document, numeric/data, and an ``experimental'' catch-all.
+Encryption runs the eight steps forward; decryption runs the same eight
+steps in reverse with \texttt{encrypt=False}. The identifier of the
+CipherList used is returned alongside the ciphertext and is required for
+decryption.
+
+The Tkinter UI (\texttt{kod8\_ui.py}) wraps this engine, and — critically
+for the threat model developed in Section~\ref{sec:threat} — persists
+encrypted output to disk in a fixed text format:
+
+\begin{lstlisting}[language=Python]
+f.write(f"# KOD8  cipher_id: {cid}\n{enc}")
+\end{lstlisting}
+
+% =====================================================================
+\section{Threat Model}
+\label{sec:threat}
+% =====================================================================
+
+We evaluate KOD8 under three progressively weaker attacker assumptions,
+each grounded in how the reference implementation actually behaves.
+
+\begin{description}[leftmargin=1.4em, style=nextline]
+  \item[\textbf{T1 — Source-available (white-box).}]
+    \texttt{KOD8\_KEY} is a hardcoded module-level constant, not a
+    user-supplied secret, a password-derived key, or a per-deployment
+    value. Any party with access to \texttt{kod8\_engine.py} — including
+    anyone who has ever received this repository, cloned it from a
+    version-control host, or extracted it from a distributed build —
+    possesses the key outright. Under Kerckhoffs's principle this would
+    normally be an acceptable assumption \emph{provided the key itself
+    remained secret}; here the key \emph{is} the source file. This is the
+    single most severe practical weakness in the system and requires no
+    cryptanalysis at all to exploit.
+  \item[\textbf{T2 — Ciphertext-and-header-only, key rotated.}]
+    A more charitable model assumes a deployer has changed
+    \texttt{KOD8\_KEY} to a private eight-digit value not present in any
+    public source tree, and that the attacker only observes
+    \texttt{.kod8} files or wire traffic. Because the CipherList
+    identifier is stored as a cleartext header (Section~\ref{sec:cid}),
+    the attacker's search problem is immediately reduced to: recover one
+    eight-digit key against one \emph{known} 8-step chain — not, as the
+    ``six independent CipherLists'' design might suggest, a joint
+    key-and-chain identification problem.
+  \item[\textbf{T3 — Known-plaintext.}]
+    The strongest assumption we exercise empirically in
+    Section~\ref{sec:brute} is a single known plaintext/ciphertext pair,
+    which is a routine assumption in classical cryptanalysis and
+    realistic here: KOD8's own self-test harness, UI placeholder text,
+    and predictable file headers (e.g.\ document boilerplate, JSON key
+    names) are all plausible cribs.
+\end{description}
+
+The remainder of this report shows that KOD8 does not survive T2 or T3,
+and trivially fails under T1.
+
+% =====================================================================
+\section{Per-Primitive Key-Dependence Analysis}
+\label{sec:entropy}
+% =====================================================================
+
+The chain-safety documentation in \texttt{kod8\_engine.py} advertises
+``6 CipherLists $\times$ 8 steps'' as the source of the scheme's
+strength. We traced every primitive's use of \texttt{KOD8\_KEY} directly
+in source and confirmed each classification by execution. Table~\ref{tab:entropy}
+summarizes the result: of the primitives available to the engine, six
+reference \texttt{KOD8\_KEY} in \emph{no way whatsoever}, and of the
+remainder, several derive from only a small function of the key rather
+than the full eight-digit value.
+
+\begin{table}[h]
+\centering
+\small
+\caption{Effective key-dependent state space per primitive, against a
+nominal $10^{8}$-key eight-digit key. ``Zero'' means the operation is
+fully determined by the algorithm alone once it is known — which,
+per Kerckhoffs's principle, must be assumed.}
+\label{tab:entropy}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Primitive} & \textbf{Key dependence} & \textbf{Effective states} \\
+\midrule
+\texttt{op\_hex}          & none (encoding only)         & 1 (zero) \\
+\texttt{op\_base64}       & none (encoding only)         & 1 (zero) \\
+\texttt{op\_atbash\_tr}   & none                          & 1 (zero) \\
+\texttt{op\_unicode\_shift} & none (delta hardcoded $\pm5$) & 1 (zero) \\
+\texttt{op\_rail\_fence}  & none (rails hardcoded per CL) & 1 (zero) \\
+\texttt{op\_block\_rotate} & none ($n$ hardcoded to 3)    & 1 (zero) \\
+\texttt{op\_split\_reverse} & none                        & 1 (zero) \\
+\texttt{op\_full\_reverse} & none                          & 1 (zero) \\
+\texttt{op\_columnar}     & digit-sum mod 5 & \textbf{5} (columns $\in\{4..8\}$) \\
+\texttt{op\_xor\_key}     & first digit only              & \textbf{10} \\
+\texttt{op\_rolling\_xor} & first digit only (seed)       & \textbf{10} \\
+\texttt{op\_sbox}         & weighted digit-sum ($\Sigma\, d_i \! \cdot\! (i{+}1)$) & \textbf{325} \\
+\texttt{op\_block\_xor\_cbc} & IV = literal \texttt{KOD8\_KEY} string & fixed, non-random \\
+\texttt{op\_block\_shuffle} & digits mod block count, deduplicated & $\le 8!$, usually far smaller \\
+\texttt{op\_vigenere\_tr} & full key, period-8 repeating shift & $10^{8}$ (nominal) \\
+\texttt{op\_base36}       & full key, period-8 repeating shift & $10^{8}$ (nominal) \\
+\texttt{op\_keystream\_xor} & full key as LCG seed          & $10^{8}$ (nominal) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Three findings from Table~\ref{tab:entropy} are worth stating explicitly.
+
+\paragraph{(a) Six of seventeen primitives are not cryptographic at all.}
+\texttt{op\_atbash\_tr}, \texttt{op\_unicode\_shift},
+\texttt{op\_rail\_fence}, \texttt{op\_block\_rotate},
+\texttt{op\_split\_reverse}, and \texttt{op\_full\_reverse} never inspect
+\texttt{KOD8\_KEY}. We confirmed this by static inspection of every
+function body:
+
+\begin{lstlisting}[language=Python]
+op_atbash_tr      -> references KOD8_KEY: False
+op_unicode_shift  -> references KOD8_KEY: False
+op_rail_fence     -> references KOD8_KEY: False
+op_block_rotate   -> references KOD8_KEY: False
+op_split_reverse  -> references KOD8_KEY: False
+op_full_reverse   -> references KOD8_KEY: False
+\end{lstlisting}
+
+In CL1 (plain text), for example, four of the eight advertised layers —
+\texttt{atbash\_tr}, \texttt{block\_rotate}, \texttt{unicode\_shift}, and
+\texttt{full\_reverse} — fall into this category. Under Kerckhoffs's
+assumption (the attacker knows the algorithm, only the key is secret),
+these steps contribute \emph{no} confidentiality whatsoever: they are
+fixed, publicly known, and instantly invertible by anyone who has read
+this report or the source. Their function is purely to increase visual
+and structural obfuscation, not adversarial work factor.
+
+\paragraph{(b) The columnar-transposition parameter has only five possible values.}
+\texttt{op\_columnar} derives its column count from
+\texttt{(sum(int(d) for d in KOD8\_KEY) \% 5) + 4}. Since this is bounded
+between 4 and 8 regardless of the underlying key, we confirmed empirically
+that 100{,}000 randomly sampled eight-digit keys produce only the five
+values $\{4,5,6,7,8\}$ — meaning an attacker can exhaustively enumerate
+every possible columnar transposition used by CL4 in five trials.
+
+\paragraph{(c) The S-box seed collapses an $10^{8}$ key into 325 states.}
+The deterministic Fisher–Yates shuffle that produces the substitution
+box used by CL2, CL5, and CL6 is seeded with a positionally weighted
+digit sum,
+\begin{lstlisting}[language=Python]
+seed = sum(int(c) * (i + 1) for i, c in enumerate(KOD8_KEY))
+\end{lstlisting} For an eight-digit key this expression
+is bounded between 0 (all-zero key) and $9\times(1+2+\cdots+8)=324$,
+i.e.\ \textbf{325 possible seed values, and therefore at most 325
+distinct S-boxes}, independent of which of the $10^{8}$ nominal keys is
+in use. We validated this by sampling 200{,}000 random eight-digit keys
+and recording the resulting seed:
+
+\begin{lstlisting}
+Distinct S-box seeds observed in 200,000 random keys: 287
+Theoretical maximum distinct seeds: 325
+\end{lstlisting}
+
+\noindent
+This is close to the theoretical ceiling, as expected once the sample
+size exceeds the state space by two orders of magnitude. Practically,
+this means an attacker facing any CipherList that uses \texttt{op\_sbox}
+never needs to search $10^{8}$ keys for that layer — a 325-entry
+precomputed table of candidate S-boxes suffices, and each candidate can
+be tested in microseconds.
+
+% =====================================================================
+\section{Fixed Initialization Vector in the CBC-Style Layer}
+\label{sec:iv}
+% =====================================================================
+
+\texttt{op\_block\_xor\_cbc} is explicitly modeled on CBC-mode block
+chaining, with each plaintext block XORed against the \emph{previous
+ciphertext block}, seeded by an initialization vector:
+
+\begin{lstlisting}[language=Python]
+iv = (KOD8_KEY * ((block_size // len(KOD8_KEY)) + 1))[:block_size]
+\end{lstlisting}
+
+With the default \texttt{block\_size=8}, which is also the length of
+\texttt{KOD8\_KEY}, this expression reduces to \texttt{iv == KOD8\_KEY}
+verbatim — we confirmed this by direct execution:
+
+\begin{lstlisting}
+block_xor_cbc IV == KOD8_KEY literally: True '86247931'
+\end{lstlisting}
+
+This has two consequences that a real block cipher's CBC mode is
+specifically designed to avoid:
+
+\begin{enumerate}[leftmargin=1.6em]
+\item \textbf{The IV is not random and is never varied per message.}
+Every invocation of every CipherList that uses this primitive
+(CL2, CL3) uses the identical IV. Combined with the determinism shown in
+Section~\ref{sec:determinism}, this guarantees that identical inputs
+always chain identically from the very first block.
+\item \textbf{The IV is not distinct from the key.} In a textbook CBC
+construction the IV need not be secret, but reusing key material
+\emph{as} the IV needlessly collapses two independent security
+parameters (confidentiality key, chaining diversifier) into one,
+removing any benefit CBC-style chaining would otherwise provide against
+identical-prefix leakage across messages encrypted under different
+(hypothetical, rotated) keys.
+\end{enumerate}
+
+% =====================================================================
+\section{Determinism and the Absence of Semantic Security}
+\label{sec:determinism}
+% =====================================================================
+
+Because every layer of every CipherList is either unkeyed
+(Section~\ref{sec:entropy}) or keyed only by the static
+\texttt{KOD8\_KEY} with no per-message nonce, salt, or random IV
+anywhere in the chain, KOD8 is fully deterministic: identical plaintext
+always produces byte-identical ciphertext.
+
+\begin{lstlisting}
+Same plaintext -> same ciphertext (deterministic)? True
+\end{lstlisting}
+
+This was confirmed by encrypting the string \texttt{"THE MEETING IS AT
+NOON"} twice, via two independent \texttt{Kod8} instances, and observing
+identical output both times. Deterministic encryption fails the standard
+notion of semantic security (IND-CPA): an observer who cannot decrypt a
+single message can still detect message repetition, build a
+frequency profile of recurring ciphertexts across a captured
+communication stream, and mount straightforward replay or
+dictionary-matching attacks — all without ever recovering the key.
+
+% =====================================================================
+\section{Absence of Integrity and Authentication}
+% =====================================================================
+
+No primitive in KOD8 produces or checks a message authentication code,
+and \texttt{decrypt()} performs no integrity validation on its output.
+Worse, several primitives are written to fail \emph{silently}. For
+example:
+
+\begin{lstlisting}[language=Python]
+def op_hex(text: str, encrypt: bool, **_) -> str:
+    if encrypt:
+        return text.encode("utf-8").hex().upper()
+    try:
+        return bytes.fromhex(text).decode("utf-8")
+    except Exception:
+        return text
+\end{lstlisting}
+
+A malformed or tampered ciphertext does not raise an error here; it
+silently falls through and returns the (still-encrypted, or
+partially-mangled) input unchanged, which then continues through the
+remaining seven reverse steps and is ultimately displayed to the user as
+if it were valid plaintext. \texttt{op\_base64} exhibits the identical
+pattern. This is a textbook malleability weakness: an attacker with
+write access to the ciphertext channel can flip, truncate, or splice
+bytes — particularly within the XOR-based layers, which are linear and
+therefore preserve attacker-controlled deltas directly into the
+recovered plaintext — with no cryptographic mechanism to detect the
+tampering.
+
+% =====================================================================
+\section{Cleartext CipherList Disclosure}
+\label{sec:cid}
+% =====================================================================
+
+KOD8's auto-detection mechanism (\texttt{auto\_detect}) is presented as
+adding an extra layer of ambiguity: a ciphertext could, in principle,
+have been produced by any of six different eight-step chains. In the
+reference implementation this ambiguity does not survive contact with
+the persistence layer. \texttt{kod8\_ui.py} writes every saved file as:
+
+\begin{lstlisting}[language=Python]
+f.write(f"# KOD8  cipher_id: {cid}\n{enc}")
+\end{lstlisting}
+
+and the decrypt path reads this header back out directly:
+
+\begin{lstlisting}[language=Python]
+if line.startswith("# KOD8  cipher_id:"):
+    cid = line.split(":")[1].strip()
+\end{lstlisting}
+
+Every \texttt{.kod8} file therefore discloses, in cleartext, exactly
+which of the six eight-step chains was used. This reduces the
+attacker's problem from ``recover a key against an unknown one-of-six
+chain'' to ``recover a key against one specific, fully known chain'' —
+eliminating what would otherwise be the system's only source of
+genuine combinatorial ambiguity beyond the key itself.
+
+% =====================================================================
+\section{Empirical Key Recovery}
+\label{sec:brute}
+% =====================================================================
+
+To establish a concrete, conservative upper bound on attack cost, we
+implemented a blind known-plaintext brute-force attack against CL1 (the
+plain-text CipherList) that makes \emph{no} use of the entropy-collapse
+findings in Section~\ref{sec:entropy} — i.e.\ it searches the full
+nominal $10^{8}$ keyspace as if every digit of \texttt{KOD8\_KEY}
+contributed independently to every step, which Table~\ref{tab:entropy}
+shows is not actually the case.
+
+\subsection{Method}
+
+A plaintext (\texttt{"ATTACK AT DAWN TOMORROW"}) was encrypted once
+under the reference key to obtain a known plaintext/ciphertext pair.
+For each of $N$ randomly sampled eight-digit candidate keys, we
+re-derived the dependent S-box exactly as the engine does at import
+time, ran the full CL1 decryption chain, and compared the result to the
+known plaintext. Per-trial wall-clock time was measured directly and
+extrapolated linearly to the full $10^{8}$-key search.
+
+\subsection{Results}
+
+\begin{lstlisting}
+2000 trials in 0.1676s -> 83.80 microseconds/trial
+Found at trial 1000 (candidate = true key '86247931')
+Estimated time for exhaustive 10^8 search
+  (single core, unoptimized reference Python): 8379.7s ~= 2.33 hours
+\end{lstlisting}
+
+This is a \emph{worst-case, no-shortcuts} figure using an interpreted,
+unoptimized reference implementation on a single CPU core. It is an
+upper bound in every practical sense:
+
+\begin{itemize}[leftmargin=1.6em]
+\item \textbf{Parallelization.} The search is embarrassingly parallel
+(each candidate key is independent). Across 32 cores, 2.33 hours falls
+to under 4.4 minutes; on commodity cloud infrastructure or a GPU-hosted
+implementation, recovery drops to seconds.
+\item \textbf{Algorithmic shortcuts.} Section~\ref{sec:entropy} shows
+that \texttt{op\_xor\_key} and \texttt{op\_rolling\_xor} depend only on
+the first key digit (10 candidates), and that the S-box depends on only
+325 candidate seeds rather than $10^{8}$ keys. A cryptanalyst exploiting
+these facts — for example, solving \texttt{op\_xor\_key} directly via a
+single-byte-XOR frequency or known-plaintext attack, and enumerating the
+325-entry S-box table rather than the full key — reduces several
+CipherLists' effective search space by five to six orders of magnitude,
+to the point of near-instant recovery on a laptop.
+\item \textbf{No implementation optimization was attempted.} The
+benchmark uses pure-Python string operations with no vectorization,
+caching, or compiled extensions; a systems-level reimplementation (C,
+Rust, or even NumPy-vectorized Python) would be expected to improve
+per-trial latency by one to two further orders of magnitude.
+\end{itemize}
+
+% =====================================================================
+\section{Per-CipherList Summary}
+% =====================================================================
+
+Table~\ref{tab:cl-summary} aggregates the findings above per CipherList,
+identifying the weakest key-dependent primitive in each chain — i.e.\
+the layer a cryptanalyst would target first.
+
+\begin{table}[h]
+\centering
+\small
+\caption{Weakest link per CipherList and the resulting practical attack surface.}
+\label{tab:cl-summary}
+\begin{tabular}{@{}p{1.1cm}p{3.6cm}p{4.6cm}p{4.2cm}@{}}
+\toprule
+\textbf{ID} & \textbf{Input class} & \textbf{Weakest keyed primitive} & \textbf{Practical implication} \\
+\midrule
+CL1 & Plain text & \texttt{op\_xor\_key} (10 states) & Trivial single-byte-XOR solve; 4 of 8 steps unkeyed \\
+CL2 & Image & \texttt{op\_sbox} (325 states) + fixed CBC IV & S-box table lookup; deterministic chaining from block 0 \\
+CL3 & Video & fixed CBC IV (\texttt{op\_block\_xor\_cbc}) & Identical file prefixes leak identical ciphertext prefixes \\
+CL4 & Document & \texttt{op\_columnar} (5 states) & Column count enumerable in 5 trials \\
+CL5 & Numeric/data & \texttt{op\_sbox} (325 states) & S-box table lookup dominates over full-key search \\
+CL6 & Experimental (fallback) & \texttt{op\_sbox} (325 states) & Same as CL2/CL5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+% =====================================================================
+\section{Discussion}
+% =====================================================================
+
+Taken together, these findings support a specific and fairly narrow
+conclusion: \textbf{KOD8 is a well-constructed \emph{obfuscation}
+layer and a legitimate example of classical product-cipher design, but
+it does not meet the security expectations implied by its ``8-layer,
+6-strategy'' framing, and it should not be relied upon to protect data
+against a motivated adversary.}
+
+This is not a criticism unique to KOD8; it is the expected outcome for
+\emph{any} cipher built from XOR, substitution, and transposition
+primitives over a small numeric key without a formal security proof,
+a vetted key-derivation function, randomized nonces, and an
+authenticated-encryption construction. Two observations frame this
+constructively rather than dismissively:
+
+\begin{enumerate}[leftmargin=1.6em]
+\item \textbf{The stated design goal — resisting casual, automated,
+pattern-based decoding (e.g.\ by an LLM skimming ciphertext for
+recognizable structure) — is a materially different, and much weaker,
+goal than confidentiality against a targeted cryptanalytic adversary.}
+Under the former goal, several of the ``zero-entropy'' primitives in
+Table~\ref{tab:entropy} (Atbash, transpositions, codepoint shifting)
+are entirely reasonable: they destroy exactly the kind of surface-level
+regularity that pattern-matching or naive statistical decoding would
+key off, even though they add nothing against a human cryptanalyst who
+reads the source. Evaluated against \emph{that} narrower goal, KOD8
+likely performs its intended job.
+\item \textbf{The gap between the two goals is exactly where the
+current implementation is most exposed}, principally via T1 (hardcoded
+key) and the cleartext CipherList header — both of which are
+implementation choices, not inherent to the cipher-chain design, and
+both are straightforward to remediate without redesigning the eight
+primitive families.
+\end{enumerate}
+
+% =====================================================================
+\section{Recommendations}
+% =====================================================================
+
+\begin{enumerate}[leftmargin=1.6em]
+\item \textbf{Never treat KOD8 in its current form as confidentiality
+protection for sensitive data.} If genuine confidentiality is required,
+use a vetted AEAD construction (AES-256-GCM or ChaCha20-Poly1305) with a
+key derived via a proper KDF (Argon2id, scrypt, or PBKDF2 with a modern
+iteration count) from a user-supplied passphrase — not a hardcoded
+constant.
+\item \textbf{If KOD8 is retained for its stated obfuscation purpose},
+document that scope explicitly in the code and UI so future users do
+not mistake it for a security control, and stop persisting the
+CipherList identifier in cleartext alongside the ciphertext — derive it
+instead from a value only the key holder can compute (e.g.\ include it
+inside the encrypted payload).
+\item \textbf{Introduce a random, per-message nonce or IV} into any
+retained CBC-style or keystream layer, transmitted alongside (not
+derived from) the ciphertext, to eliminate the determinism identified
+in Section~\ref{sec:determinism}.
+\item \textbf{Add a MAC or AEAD tag} (even a simple HMAC-SHA256 over the
+final ciphertext) so that tampering is detected rather than silently
+decrypted into plausible-looking garbage, closing the failure mode in
+Section~\ref{sec:iv}.
+\item \textbf{Re-derive the S-box seed from the full key material}
+(e.g.\ via a cryptographic hash of \texttt{KOD8\_KEY} rather than a
+positional digit sum) to eliminate the 325-state collapse in
+Section~\ref{sec:entropy}.
+\end{enumerate}
+
+% =====================================================================
+\section{Conclusion}
+% =====================================================================
+
+We performed a source-grounded, empirically validated cryptanalysis of
+KOD8. Static analysis of all seventeen primitives shows that only
+three of the eight steps in a typical CipherList meaningfully depend on
+the key, and that the two primitives most resembling ``real''
+cryptographic components — the S-box and the CBC-style block XOR —
+each contain implementation-level defects (a 325-state seed collapse and
+a literal-key-as-IV reuse, respectively) that remove most of the
+protection their design intends to provide. A conservative,
+no-shortcuts, known-plaintext brute-force attack recovers the full
+eight-digit key against the plain-text CipherList in under 2.4 hours on
+a single CPU core with an unoptimized reference implementation, and the
+structural weaknesses identified here reduce that further to seconds.
+Combined with a hardcoded global key and a cleartext CipherList header
+in the reference file format, KOD8 is best classified as a classical
+obfuscation cipher suitable for resisting casual or automated
+pattern-based inspection, not as a cryptographically secure scheme, and
+it should be labeled and used accordingly.
+
+\end{document}
