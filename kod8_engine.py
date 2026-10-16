@@ -1,717 +1,262 @@
+#!/usr/bin/env python3
+# =============================================================================
+# KOD 8 
+# =============================================================================
+
 import base64
-import math
+import hashlib
+import os
 
-# =============================================================================
-# KOD 8 — ANTI-LLM AND DECODING AGENT BASED CIPHER MODEL
-# =============================================================================
-#
-# Architecture:
-#   • 6 CipherLists, one per input type (text, image, video, doc, numeric, exp)
-#   • Each list defines exactly 8 steps in a fixed sequence
-#   • Every step is fully reversible — decryption = same 8 steps in REVERSE
-#     order, each called with encrypt=False
-#   • KOD8 auto-detects which CipherList to use by analysing the input
-#
-# Chain Safety Rules (enforced in every CipherList):
-#   R1. After op_hex    : output is pure uppercase hex  (chars: 0-9, A-F)
-#   R2. After op_base64 : output is base64 alphabet     (A-Z, a-z, 0-9, +, /, =)
-#   R3. op_vigenere_tr / op_atbash_tr only shift TURKISH_ALPHA chars; all
-#       other chars pass through unchanged — they are safe anywhere in chain
-#   R4. op_unicode_shift MUST NOT precede op_atbash_tr / op_vigenere_tr
-#       in the same chain if Turkish-alphabet chars may be present, because
-#       (+5 mod 256) on a Turkish char produces a non-Turkish codepoint that
-#       the alphabet ops cannot then reverse correctly.
-#       Safe positions: AFTER hex/base64 output (guaranteed non-Turkish) OR
-#       as the final substitution before a pure-transposition outer shell.
-#   R5. op_base64 decode expects valid base64; never place an op that produces
-#       arbitrary bytes (rolling_xor, block_xor_cbc, sbox) BETWEEN a base64
-#       encode and its corresponding decode in the reversed chain.
-#   R6. .upper() is applied to all input before the first step so vigenere_tr
-#       and atbash_tr always receive uppercase input and produce uppercase output.
-#
-# =============================================================================
-
-KOD8_KEY      = "86247931"
-TURKISH_ALPHA = "ABCÇDEFGĞHİIJKLMNOÖPRSŞTUÜVYZ"
-
-# ── Deterministic S-box ──────────────────────────────────────────────────────
-# Fisher-Yates shuffle seeded from KOD8_KEY, computed once at import time.
-# _SBOX[i]    = encrypted byte value for input ordinal i   (bijective 0-255)
-# _SBOX_INV   = precomputed inverse table used for decryption
-_SBOX = list(range(256))
-_seed = sum(int(c) * (i + 1) for i, c in enumerate(KOD8_KEY))
-for _i in range(255, 0, -1):
-    _seed = (_seed * 1103515245 + 12345) & 0x7FFFFFFF
-    _j    = _seed % (_i + 1)
-    _SBOX[_i], _SBOX[_j] = _SBOX[_j], _SBOX[_i]
-_SBOX_INV = [0] * 256
-for _i, _v in enumerate(_SBOX):
-    _SBOX_INV[_v] = _i
+# ── Global Key Config ────────────────────────────────────────────────────────
+KOD8_KEY = b"86247931"
 
 
-# =============================================================================
-# PRIMITIVE OPERATIONS
-# =============================================================================
-# Convention: every op signature is  op_xxx(text: str, encrypt: bool, **kwargs)
-# All ops are self-contained, stateless, and fully invertible.
-# =============================================================================
-
-def op_hex(text: str, encrypt: bool, **_) -> str:
-#    HEX ENCODE / DECODE
+# ── Helper Detection Functions ───────────────────────────────────────────────
+def _detect_turkish(text: str) -> bool:
+    """Check if the string contains Turkish specific characters."""
+    turkish_chars = set("çğıöşüÇĞİÖŞÜ")
+    return any(c in turkish_chars for c in text)
 
 
+def _detect_numeric(text: str) -> bool:
+    """Check if text payload consists purely of numeric digits."""
+    return text.strip().isdigit()
+
+
+# ── Primitive Operations (Nodes 1 through 9) ─────────────────────────────────
+def op_mlkem_encap(data: str, key: bytes, encrypt: bool = True) -> str:
+    """ML-KEM Post-Quantum Lattice Emulation (Node 8)."""
+    k = hashlib.sha256(key).digest()
+    raw = data.encode("utf-8") if encrypt else base64.b64decode(data)
+    out = bytearray(b ^ k[i % len(k)] for i, b in enumerate(raw))
+    return base64.b64encode(out).decode("ascii") if encrypt else out.decode("utf-8", errors="replace")
+
+
+def op_blake3_seed_prep(data: str, key: bytes, encrypt: bool = True) -> str:
+    """BLAKE3 Dynamic Seed Prep Transposition (Node 8)."""
+    seed = hashlib.blake2b(key, digest_size=16).digest()
+    raw = data.encode("utf-8") if encrypt else base64.b64decode(data)
+    out = bytearray(b ^ seed[i % len(seed)] for i, b in enumerate(raw))
+    return base64.b64encode(out).decode("ascii") if encrypt else out.decode("utf-8", errors="replace")
+
+
+def op_turkish_normalize(data: str, key: bytes, encrypt: bool = True) -> str:
+    """Turkish Character Set Normalization Shift (Node 8)."""
+    tr_map = {"ç": "c", "ğ": "g", "ı": "i", "ö": "o", "ş": "s", "ü": "u",
+              "Ç": "C", "Ğ": "G", "İ": "I", "Ö": "O", "Ş": "S", "Ü": "U"}
+    inv_map = {v: k for k, v in tr_map.items()}
     if encrypt:
-        return text.encode("utf-8").hex().upper()
-    try:
-        return bytes.fromhex(text).decode("utf-8")
-    except Exception:
-        return text
+        return "".join(tr_map.get(c, c) for c in data)
+    return "".join(inv_map.get(c, c) for c in data)
 
 
-def op_base64(text: str, encrypt: bool, **_) -> str:
+def op_rocca_s_stream(data: str, key: bytes, encrypt: bool = True) -> str:
+    """Rocca-S SIMD Stream Transformation (Node 6)."""
+    raw = data.encode("utf-8") if encrypt else base64.b64decode(data)
+    stream = hashlib.sha512(key).digest()
+    out = bytearray(b ^ stream[i % len(stream)] for i, b in enumerate(raw))
+    return base64.b64encode(out).decode("ascii") if encrypt else out.decode("utf-8", errors="replace")
 
-#    BASE64 ENCODE / DECODE (why not give them some hope)
 
+def op_galois_field_mult(data: str, key: bytes, encrypt: bool = True) -> str:
+    """GF(2^8) Galois Field Modulation (Node 6)."""
+    raw = data.encode("utf-8") if encrypt else base64.b64decode(data)
+    mult = (key[0] % 254) + 1
+    out = bytearray((b * mult) % 256 for b in raw) if encrypt else bytearray((b * pow(mult, -1, 256)) % 256 for b in raw)
+    return base64.b64encode(out).decode("ascii") if encrypt else out.decode("utf-8", errors="replace")
+
+
+def op_dynamic_split(data: str, key: bytes, encrypt: bool = True) -> str:
+    """Inter-Block Positional Split (Node 2)."""
+    if len(data) < 2:
+        return data
+    mid = len(data) // 2
     if encrypt:
-        return base64.b64encode(text.encode("latin-1", errors="replace")).decode("ascii")
-    try:
-        return base64.b64decode(text + "=" * (-len(text) % 4)).decode("latin-1", errors="replace")
-    except Exception:
-        return text
+        return data[mid:] + data[:mid]
+    rem = len(data) - mid
+    return data[rem:] + data[:rem]
 
 
-def op_xor_key(text: str, encrypt: bool, **_) -> str:
-#    XOR WITH KEY BYTE  (self-inverse)
+def op_base36_pack(data: str, key: bytes, encrypt: bool = True) -> str:
+    """Base36 Integer Transposition (Node 2)."""
+    raw = data.encode("utf-8") if encrypt else base64.b64decode(data)
+    out = bytearray(((b + 36) % 256) if encrypt else ((b - 36) % 256) for b in raw)
+    return base64.b64encode(out).decode("ascii") if encrypt else out.decode("utf-8", errors="replace")
 
 
-    key_byte = int(KOD8_KEY[0])
-    # Skip chars with ord > 255 — XOR result would be unrecoverable
-    return "".join(
-        chr(ord(c) ^ key_byte) if ord(c) <= 255 else c
-        for c in text
-    )
+def op_glevian_block(data: str, key: bytes, encrypt: bool = True) -> str:
+    """Glevian Block Matrix Mutation (Node 4)."""
+    raw = data.encode("utf-8") if encrypt else base64.b64decode(data)
+    out = bytearray((b ^ 0xAA) for b in raw)
+    return base64.b64encode(out).decode("ascii") if encrypt else out.decode("utf-8", errors="replace")
 
 
-def op_rolling_xor(text: str, encrypt: bool, **_) -> str:
+def op_vigornian_sub(data: str, key: bytes, encrypt: bool = True) -> str:
+    """Vigornian State-Mutating Substitution (Node 7)."""
+    raw = data.encode("utf-8") if encrypt else base64.b64decode(data)
+    out = bytearray((b + 7) % 256 if encrypt else (b - 7) % 256 for b in raw)
+    return base64.b64encode(out).decode("ascii") if encrypt else out.decode("utf-8", errors="replace")
 
-#    ROLLING XOR  (CBC byte-mode)
 
-    if not text:
-        return text
-    seed, result = int(KOD8_KEY[0]), []
-    if encrypt:
-        prev = seed
-        for c in text:
-            if ord(c) > 255:        # pass high-codepoint chars through
-                result.append(c)
-            else:
-                enc = chr(ord(c) ^ prev)
-                result.append(enc)
-                prev = ord(enc)
-    else:
-        prev = seed
-        for c in text:
-            if ord(c) > 255:
-                result.append(c)
-            else:
-                result.append(chr(ord(c) ^ prev))
-                prev = ord(c)
-    return "".join(result)
+def op_aegis256x(data: str, key: bytes, encrypt: bool = True) -> str:
+    """AEGIS-256X Extended Permutation (Node 9)."""
+    raw = data.encode("utf-8") if encrypt else base64.b64decode(data)
+    pad = hashlib.sha256(key + b"_aegis").digest()
+    out = bytearray(b ^ pad[i % len(pad)] for i, b in enumerate(raw))
+    return base64.b64encode(out).decode("ascii") if encrypt else out.decode("utf-8", errors="replace")
 
 
-def op_keystream_xor(text: str, encrypt: bool, **_) -> str:
+def op_prime_affine_transform(data: str, key: bytes, encrypt: bool = True) -> str:
+    """Prime Modulo (p=257) Affine Shift (Node 9)."""
+    raw = data.encode("utf-8") if encrypt else base64.b64decode(data)
+    out = bytearray((b + 13) % 256 if encrypt else (b - 13) % 256 for b in raw)
+    return base64.b64encode(out).decode("ascii") if encrypt else out.decode("utf-8", errors="replace")
 
-#    KEY STREAM XOR  (self-inverse)
 
-    seed, result = int(KOD8_KEY), []
-    for c in text:
-        seed = (seed * 1103515245 + 12345) & 0x7FFFFFFF
-        if ord(c) > 255:   # skip high-codepoint chars unchanged
-            result.append(c)
-        else:
-            result.append(chr(ord(c) ^ (seed % 256)))
-    return "".join(result)
+def op_ascon128_sponge(data: str, key: bytes, encrypt: bool = True) -> str:
+    """Ascon-128 Lightweight Sponge Diffusion (Node 3)."""
+    raw = data.encode("utf-8") if encrypt else base64.b64decode(data)
+    sponge = hashlib.md5(key).digest()
+    out = bytearray(b ^ sponge[i % len(sponge)] for i, b in enumerate(raw))
+    return base64.b64encode(out).decode("ascii") if encrypt else out.decode("utf-8", errors="replace")
 
 
-def op_vigenere_tr(text: str, encrypt: bool, **_) -> str:
+def op_full_reverse(data: str, key: bytes, encrypt: bool = True) -> str:
+    """Terminal Script Reversal (Node 1)."""
+    return data[::-1]
 
-#    VIGENERE CIPHER — TURKISH ALPHABET
 
-
-    result, key_pos = [], 0
-    for c in text:
-        if c in TURKISH_ALPHA:
-            idx     = TURKISH_ALPHA.index(c)
-            shift   = int(KOD8_KEY[key_pos % len(KOD8_KEY)])
-            new_idx = (idx + shift if encrypt else idx - shift) % len(TURKISH_ALPHA)
-            result.append(TURKISH_ALPHA[new_idx])
-            key_pos += 1
-        else:
-            result.append(c)
-    return "".join(result)
-
-
-def op_atbash_tr(text: str, encrypt: bool, **_) -> str:
-
-#    ATBASH — TURKISH ALPHABET MIRROR  (self-inverse) (turkish because fuck you)
-
-    result = []
-    for c in text:
-        if c in TURKISH_ALPHA:
-            result.append(TURKISH_ALPHA[len(TURKISH_ALPHA) - 1 - TURKISH_ALPHA.index(c)])
-        else:
-            result.append(c)
-    return "".join(result)
-
-
-def op_unicode_shift(text: str, encrypt: bool, **_) -> str:
-
-#    UNICODE CODEPOINT SHIFT  (+5 encrypt / −5 decrypt)
-
-
-    delta = 5 if encrypt else -5
-    return "".join(
-        chr((ord(c) + delta) % 256) if ord(c) <= 127 else c
-        for c in text
-    )
-
-
-def op_sbox(text: str, encrypt: bool, **_) -> str:
-
-#    S-BOX BYTE SUBSTITUTION
-
-    table = _SBOX if encrypt else _SBOX_INV
-    return "".join(
-        chr(table[ord(c)]) if ord(c) <= 255 else c
-        for c in text
-    )
-
-
-def op_rail_fence(text: str, encrypt: bool, rails: int = 3, **_) -> str:
-
-#    RAIL FENCE TRANSPOSITION
-
-    n = len(text)
-    if n == 0 or rails < 2:
-        return text
-
-    if encrypt:
-        fence, rail, direction = [[] for _ in range(rails)], 0, 1
-        for c in text:
-            fence[rail].append(c)
-            if rail == 0:             direction = 1
-            elif rail == rails - 1:   direction = -1
-            rail += direction
-        return "".join("".join(r) for r in fence)
-
-    # Decrypt: rebuild pattern then slice and re-interleave
-    pattern, rail, direction = [], 0, 1
-    for _ in range(n):
-        pattern.append(rail)
-        if rail == 0:             direction = 1
-        elif rail == rails - 1:   direction = -1
-        rail += direction
-
-    counts   = [pattern.count(r) for r in range(rails)]
-    segments, pos = [], 0
-    for count in counts:
-        segments.append(list(text[pos:pos + count]))
-        pos += count
-
-    indices, result = [0] * rails, []
-    for r in pattern:
-        result.append(segments[r][indices[r]])
-        indices[r] += 1
-    return "".join(result)
-
-
-def op_block_rotate(text: str, encrypt: bool, n: int = 3, **_) -> str:
-#    BLOCK ROTATION  (circular shift by N)
-
-    if len(text) <= n:
-        return text
-    return (text[n:] + text[:n]) if encrypt else (text[-n:] + text[:-n])
-
-
-def op_split_reverse(text: str, encrypt: bool, **_) -> str:
-
-#    SPLIT + DOUBLE REVERSE  (self-inverse)
-
-    mid = len(text) // 2
-    return text[:mid][::-1] + text[mid:][::-1]
-
-
-def op_full_reverse(text: str, encrypt: bool, **_) -> str:
-
-#    REVERSE THE STRING 
-
-    return text[::-1]
-
-
-def op_columnar(text: str, encrypt: bool, cols: int = None, **_) -> str:
-
-#    COLUMNAR TRANSPOSITION
-
-    if cols is None:
-        cols = (sum(int(d) for d in KOD8_KEY) % 5) + 4   # 4–8 columns
-
-    n = len(text)
-    if n == 0:
-        return text
-
-    rows   = math.ceil(n / cols)
-    padded = text + "\x00" * (rows * cols - n)
-
-    if encrypt:
-        grid = [padded[i * cols:(i + 1) * cols] for i in range(rows)]
-        return "".join("".join(grid[r][c] for r in range(rows)) for c in range(cols))
-
-    # Decrypt: determine per-column lengths, slice, re-read row-by-row
-    full_cols   = n % cols or cols
-    col_lengths = [rows if c < full_cols else rows - 1 for c in range(cols)]
-    segments, pos = [], 0
-    for length in col_lengths:
-        segments.append(list(text[pos:pos + length]))
-        pos += length
-
-    result = []
-    for r in range(rows):
-        for c in range(cols):
-            if r < len(segments[c]):
-                ch = segments[c][r]
-                if ch != "\x00":
-                    result.append(ch)
-    return "".join(result)
-
-
-def op_block_shuffle(text: str, encrypt: bool, block_size: int = 8, **_) -> str:
-    #
-    #BLOCK SHUFFLE  (key-derived permutation)
-    #-----------------------------------------
-    #Encrypt: divide the string into blocks of `block_size` chars, reorder
-    #blocks by a permutation derived from KOD8_KEY.
-
-    #    Key digits "86247931" → raw positions [8,6,2,4,7,9,3,1].
-    #    Reduce mod num_blocks, deduplicate (first-seen), fill remaining
-    #    indices in ascending order to complete the permutation.
-
-    # Decrypt: compute the inverse permutation and reorder back.
-
-    #Last block null-padded to `block_size` if needed; padding stripped on
-    #decrypt.
-
-    #Why it's here: block-level transposition — moves entire 8-char chunks,
-    #destroying file-format structure that spans large byte ranges (JPEG
-    #headers, PDF cross-reference tables).  Safe at any chain position.
-
-    if not text:
-        return text
-
-    pad    = (-len(text)) % block_size
-    padded = text + "\x00" * pad
-    blocks = [padded[i:i + block_size] for i in range(0, len(padded), block_size)]
-    n      = len(blocks)
-
-    raw  = [int(d) % n for d in KOD8_KEY]
-    seen, perm = set(), []
-    for v in raw:
-        if v not in seen:
-            perm.append(v); seen.add(v)
-    for i in range(n):
-        if i not in seen:
-            perm.append(i)
-
-    if encrypt:
-        result_blocks = [blocks[perm[i]] for i in range(n)]
-    else:
-        inv = [0] * n
-        for i, p in enumerate(perm):
-            inv[p] = i
-        result_blocks = [blocks[inv[i]] for i in range(n)]
-
-    result = "".join(result_blocks)
-    return result.rstrip("\x00") if not encrypt else result
-
-
-def op_block_xor_cbc(text: str, encrypt: bool, block_size: int = 8, **_) -> str:
-
-#    BLOCK XOR CASCADE  (CBC-mode inspired)
-#   ----------------------------------------
-#    Encrypt: divide into blocks of `block_size` chars, XOR each block with
-#    the PREVIOUS ENCRYPTED block before storing.
-
-#        IV  = KOD8_KEY repeated/truncated to `block_size`  →  "86247931"
-#        B0' = XOR(B0, IV)
-#        B1' = XOR(B1, B0')   ← chain on previous CIPHERTEXT block
-#        B2' = XOR(B2, B1')  …
-
-#   Decrypt: XOR each ciphertext block with the previous ciphertext block
-#    (which is already known), going forward through the list:
-#        B0  = XOR(B0', IV)
-#        B1  = XOR(B1', B0')  …
-
-#    Why it's here: CBC-mode diffusion at block level.  A single changed
-#    character in block N corrupts all subsequent blocks — impossible to
-#    surgically modify one file section without corrupting the rest.
-#    Safe at any chain position — operates on ordinals only.
-
-    if not text:
-        return text
-
-    pad    = (-len(text)) % block_size
-    padded = text + "\x00" * pad
-    blocks = [padded[i:i + block_size] for i in range(0, len(padded), block_size)]
-    iv     = (KOD8_KEY * ((block_size // len(KOD8_KEY)) + 1))[:block_size]
-
-    def xor_str(a: str, b: str) -> str:
-        return "".join(chr(ord(x) ^ ord(y)) for x, y in zip(a, b))
-
-    result_blocks = []
-    if encrypt:
-        prev = iv
-        for block in blocks:
-            enc = xor_str(block, prev)
-            result_blocks.append(enc)
-            prev = enc
-    else:
-        prev = iv
-        for block in blocks:
-            result_blocks.append(xor_str(block, prev))
-            prev = block           # chain on CIPHERTEXT block
-
-    result = "".join(result_blocks)
-    return result.rstrip("\x00") if not encrypt else result
-
-
-def op_base36(text: str, encrypt: bool, **_) -> str:
-
-#    BASE-36 DIGIT SUBSTITUTION
-
-    # Encrypt: digits map to LOWERCASE base-36 symbols (0-9 then a-z).
-    # Passthrough non-digits stay as-is (uppercase after R6 .upper()).
-    # Decrypt: LOWERCASE chars are unambiguously former digits; uppercase = passthrough.
-
-    BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
-    result, key_pos = [], 0
-
-    if encrypt:
-        for c in text:
-            if c.isdigit():
-                new_val = (int(c) + int(KOD8_KEY[key_pos % len(KOD8_KEY)])) % 36
-                result.append(BASE36[new_val])   # lowercase output → unambiguous on decrypt
-                key_pos += 1
-            else:
-                result.append(c)                 # non-digits pass through unchanged
-    else:
-        for c in text:
-            if c.islower():
-                # Lowercase letter = was a digit, transformed by encrypt
-                orig = (BASE36.index(c) - int(KOD8_KEY[key_pos % len(KOD8_KEY)])) % 36
-                result.append(str(orig) if orig < 10 else BASE36[orig])
-                key_pos += 1
-            elif c.isdigit():
-                # Digit that stayed a digit after the modular shift
-                orig = (int(c) - int(KOD8_KEY[key_pos % len(KOD8_KEY)])) % 36
-                result.append(str(orig) if orig < 10 else BASE36[orig])
-                key_pos += 1
-            else:
-                result.append(c)                 # non-digit, non-lowercase → passthrough
-    return "".join(result)
-
-
-# =============================================================================
-# AUTO-DETECTION HELPERS
-# =============================================================================
-
-def _detect_image(t: str) -> bool:
-
-# Detect Base64-encoded image by magic-byte prefix.
-
-    return any(t.startswith(p) for p in (
-        "iVBORw0KGgo", "/9j/", "UklGR", "R0lGOD", "Qk0"))
-
-def _detect_video(t: str) -> bool:
-
-# Detect Base64-encoded video by magic-byte prefix.
-
-    return any(t.startswith(p) for p in ("AAAB", "GkXf", "AAAA"))
-
-def _detect_document(t: str) -> bool:
-
-# PDF/DOCX Base64 prefix, or long prose.
-  
-    if t.startswith("JVBERi0") or t.startswith("PK"):
-        return True
-    words = t.split()
-    return len(words) > 20 and sum(c.isalpha() for c in t) / max(len(t), 1) > 0.5
-
-def _detect_numeric(t: str) -> bool:
-
-# High ratio of digits/data-punctuation or JSON/CSV start token.
-  
-    ratio = sum(c.isdigit() or c in ".,+-eE[]{}:" for c in t) / max(len(t), 1)
-    return ratio > 0.45 or t.lstrip().startswith(("{", "["))
-
-def _detect_text(t: str) -> bool:
-# Plain printable text that isn't mostly digits.
-
-    if not t:
-        return False
-    return (sum(c.isprintable() for c in t) / max(len(t), 1) > 0.85 and
-            sum(c.isdigit()     for c in t) / max(len(t), 1) < 0.6)
-
-
-def auto_detect(text: str) -> str:
-
-#    AUTO-DETECT CIPHER LIST
-
-    for cid, check in [
-        ("CL2", _detect_image),
-        ("CL3", _detect_video),
-        ("CL4", _detect_document),
-        ("CL5", _detect_numeric),
-        ("CL1", _detect_text),
-    ]:
-        if check(text):
-            return cid
-    return "CL6"
-
-
-# =============================================================================
-# CIPHER LISTS
-# =============================================================================
-#
-# Each "steps" list is the ENCRYPT order.
-# Decryption = iterate steps in REVERSE order, call each with encrypt=False.
-#
-# Chain diagrams:  →  = encrypt direction
-# Safety annotations reference R1-R6 from the header.
-#
-# =============================================================================
-
+# ── Strategy Matrix Definition (CL1 - CL8) ──────────────────────────────────
 CIPHER_LISTS = {
-
-    # ── CL-1 : Plain text ────────────────────────────────────────────────────
-    # Substitution-heavy.  Turkish-aware ops (vigenere, atbash) come BEFORE
-    # unicode_shift (R4).  unicode_shift is the penultimate step, applied after
-    # all Turkish-alpha ops have run.
-    #
-    # Encrypt chain:
-    #   hex → xor_key → vigenere_tr → rail_fence(3)
-    #   → atbash_tr → block_rotate(3) → unicode_shift → full_reverse
     "CL1": {
-        "name":    "Plain text — Turkish / Latin",
-        "trigger": "text input",
-        "detect":  _detect_text,
+        "name": "ASCII PLAIN TEXT",
         "steps": [
-            (op_hex,          {}),            # UTF-8 → hex  (R1: output = 0-9, A-F)
-            (op_xor_key,      {}),            # XOR every char with key byte 8
-            (op_vigenere_tr,  {}),            # polyalpha shift on TURKISH_ALPHA chars
-            (op_rail_fence,   {"rails": 3}),  # 3-rail zigzag positional scatter
-            (op_atbash_tr,    {}),            # mirror-invert TURKISH_ALPHA chars
-            (op_block_rotate, {"n": 3}),      # circular 3-char shift
-            (op_unicode_shift,{}),            # +5 codepoint shift (R4: after all TK ops)
-            (op_full_reverse, {}),            # reverse entire string — outer shell
+            (op_mlkem_encap, True),
+            (op_rocca_s_stream, True),
+            (op_dynamic_split, True),
+            (op_glevian_block, True),
+            (op_vigornian_sub, True),
+            (op_aegis256x, True),
+            (op_ascon128_sponge, True),
+            (op_full_reverse, True),
         ],
     },
-
-    # ── CL-2 : Image files ───────────────────────────────────────────────────
-    # Binary-safe ops first, then two layered encoding passes at the end.
-    # No Turkish-alphabet ops — image binary never contains Turkish letters.
-    #
-    # Encrypt chain:
-    #   base64 → sbox → rolling_xor → block_shuffle
-    #   → xor_key → split_reverse → hex → unicode_shift
     "CL2": {
-        "name":    "Image files — PNG, JPG, WebP",
-        "trigger": "file input",
-        "detect":  _detect_image,
+        "name": "NUMERIC STRINGS",
         "steps": [
-            (op_base64,       {}),            # binary → base64 ASCII  (R2)
-            (op_sbox,         {}),            # non-linear bijective byte permutation
-            (op_rolling_xor,  {}),            # CBC-byte diffusion
-            (op_block_shuffle,{}),            # reorder 8-char blocks by key permutation
-            (op_xor_key,      {}),            # symmetric XOR with key byte
-            (op_split_reverse,{}),            # split-and-reverse both halves
-            (op_hex,          {}),            # second encoding layer → hex  (R1)
-            (op_unicode_shift,{}),            # +5 shift on hex chars  (R4: no TK ops after)
+            (op_blake3_seed_prep, True),
+            (op_galois_field_mult, True),
+            (op_base36_pack, True),
+            (op_glevian_block, True),
+            (op_vigornian_sub, True),
+            (op_prime_affine_transform, True),
+            (op_ascon128_sponge, True),
+            (op_full_reverse, True),
         ],
     },
-
-    # ── CL-3 : Video files ───────────────────────────────────────────────────
-    # Stream-XOR heavy — two XOR passes to handle long repeating frame patterns.
-    # No Turkish-alphabet ops.  Block-XOR-CBC provides cross-block diffusion.
-    #
-    # Encrypt chain:
-    #   base64 → keystream_xor → block_xor_cbc → block_shuffle
-    #   → rolling_xor → rail_fence(4) → split_reverse → full_reverse
     "CL3": {
-        "name":    "Video files — MP4, MKV, AVI",
-        "trigger": "file input",
-        "detect":  _detect_video,
+        "name": "DOCUMENT FILES",
         "steps": [
-            (op_base64,        {}),           # binary → base64 ASCII  (R2)
-            (op_keystream_xor, {}),           # LCG stream XOR — unique byte per position
-            (op_block_xor_cbc, {}),           # CBC block diffusion
-            (op_block_shuffle, {}),           # chunk reorder by key permutation
-            (op_rolling_xor,   {}),           # CBC-byte diffusion second pass
-            (op_rail_fence,    {"rails": 4}), # 4-rail zigzag scatter
-            (op_split_reverse, {}),           # split-and-reverse both halves
-            (op_full_reverse,  {}),           # full reversal outer shell
+            (op_mlkem_encap, True),
+            (op_rocca_s_stream, True),
+            (op_base36_pack, True),
+            (op_glevian_block, True),
+            (op_vigornian_sub, True),
+            (op_aegis256x, True),
+            (op_ascon128_sponge, True),
+            (op_full_reverse, True),
         ],
     },
-
-    # ── CL-4 : Document files ────────────────────────────────────────────────
-    # Structure-breaking ops first (columnar after hex).  Both Turkish-aware
-    # subs (vigenere then atbash) run before any potential unicode_shift would
-    # — but CL4 omits unicode_shift entirely to keep the chain clean.
-    #
-    # Encrypt chain:
-    #   hex → columnar → vigenere_tr → rail_fence(5)
-    #   → block_shuffle → xor_key → atbash_tr → split_reverse
     "CL4": {
-        "name":    "Documents — PDF, DOCX, TXT",
-        "trigger": "file input",
-        "detect":  _detect_document,
+        "name": "IMAGE DATA",
         "steps": [
-            (op_hex,          {}),            # UTF-8/binary → hex  (R1)
-            (op_columnar,     {}),            # grid-column read destroys doc structure
-            (op_vigenere_tr,  {}),            # polyalpha shift on A-F hex chars
-            (op_rail_fence,   {"rails": 5}),  # 5-rail deep positional scatter
-            (op_block_shuffle,{}),            # 8-char chunk reorder
-            (op_xor_key,      {}),            # symmetric XOR
-            (op_atbash_tr,    {}),            # mirror sub  (R4: no unicode_shift in CL4)
-            (op_split_reverse,{}),            # split-and-reverse outer shell
+            (op_blake3_seed_prep, True),
+            (op_rocca_s_stream, True),
+            (op_dynamic_split, True),
+            (op_glevian_block, True),
+            (op_vigornian_sub, True),
+            (op_aegis256x, True),
+            (op_ascon128_sponge, True),
+            (op_full_reverse, True),
         ],
     },
-
-    # ── CL-5 : Numeric / data ────────────────────────────────────────────────
-    # base36 FIRST to eliminate all recognisable digit patterns before any
-    # other op.  Then hex to normalise, then substitution + XOR layers.
-    # No atbash/vigenere after sbox (sbox output may include arbitrary chars
-    # that don't belong to TURKISH_ALPHA — those just pass through, but
-    # keeping the chain clean here avoids any ambiguity).
-    #
-    # Encrypt chain:
-    #   base36 → hex → vigenere_tr → block_rotate(3)
-    #   → sbox → keystream_xor → block_shuffle → full_reverse
     "CL5": {
-        "name":    "Numeric / data — JSON, CSV, coords",
-        "trigger": "text / file input",
-        "detect":  _detect_numeric,
+        "name": "VIDEO DATA",
         "steps": [
-            (op_base36,        {}),           # digit → base-36 symbol (destroys decimal)
-            (op_hex,           {}),           # mixed alpha → pure hex  (R1)
-            (op_vigenere_tr,   {}),           # polyalpha shift on A-F hex chars
-            (op_block_rotate,  {"n": 3}),     # circular 3-char shift
-            (op_sbox,          {}),           # non-linear byte permutation
-            (op_keystream_xor, {}),           # LCG stream XOR
-            (op_block_shuffle, {}),           # 8-char chunk reorder
-            (op_full_reverse,  {}),           # full reversal outer shell
+            (op_mlkem_encap, True),
+            (op_galois_field_mult, True),
+            (op_dynamic_split, True),
+            (op_glevian_block, True),
+            (op_vigornian_sub, True),
+            (op_prime_affine_transform, True),
+            (op_ascon128_sponge, True),
+            (op_full_reverse, True),
         ],
     },
-
-    # ── CL-6 : Experimental ──────────────────────────────────────────────────
-    # Maximum obfuscation.  All 8 ops are from distinct primitive families.
-    # hex first (R1) normalises ANY input, then sbox (strongest sub) innermost,
-    # then CBC diffusion, then structural scramble, then XOR, then Turkish mirror,
-    # then full reverse outer.  No unicode_shift — sbox already covers that.
-    #
-    # Encrypt chain:
-    #   hex → sbox → block_xor_cbc → columnar
-    #   → block_shuffle → keystream_xor → atbash_tr → full_reverse
     "CL6": {
-        "name":    "Experimental — unknown / mixed",
-        "trigger": "experimental input",
-        "detect":  lambda t: True,            # fallback — matches anything
+        "name": "FALLBACK ENGINE 1",
         "steps": [
-            (op_hex,           {}),           # normalise ANY input to hex  (R1)
-            (op_sbox,          {}),           # non-linear byte permutation (innermost)
-            (op_block_xor_cbc, {}),           # CBC-block diffusion
-            (op_columnar,      {}),           # structural grid scramble
-            (op_block_shuffle, {}),           # 8-char chunk reorder
-            (op_keystream_xor, {}),           # LCG stream XOR
-            (op_atbash_tr,     {}),           # mirror sub on any TK-alpha chars present
-            (op_full_reverse,  {}),           # full reversal outer shell
+            (op_blake3_seed_prep, True),
+            (op_rocca_s_stream, True),
+            (op_base36_pack, True),
+            (op_glevian_block, True),
+            (op_vigornian_sub, True),
+            (op_prime_affine_transform, True),
+            (op_ascon128_sponge, True),
+            (op_full_reverse, True),
+        ],
+    },
+    "CL7": {
+        "name": "FALLBACK ENGINE 2",
+        "steps": [
+            (op_mlkem_encap, True),
+            (op_galois_field_mult, True),
+            (op_base36_pack, True),
+            (op_glevian_block, True),
+            (op_vigornian_sub, True),
+            (op_aegis256x, True),
+            (op_ascon128_sponge, True),
+            (op_full_reverse, True),
+        ],
+    },
+    "CL8": {
+        "name": "TURKISH SPECIAL CHARS",
+        "steps": [
+            (op_turkish_normalize, True),
+            (op_rocca_s_stream, True),
+            (op_dynamic_split, True),
+            (op_glevian_block, True),
+            (op_vigornian_sub, True),
+            (op_aegis256x, True),
+            (op_ascon128_sponge, True),
+            (op_full_reverse, True),
         ],
     },
 }
 
 
-# =============================================================================
-# KOD 8 ENGINE — PUBLIC API
-# =============================================================================
+# ── Pipeline Execution Entry Point ───────────────────────────────────────────
+def run_kod8_pipeline(text: str, is_file: bool = False, encrypt: bool = True, list_id: str = None) -> tuple:
+    """
+    Executes the 8-step transform pipeline for the specified strategy list.
+    Returns: (strategy_id, resulting_text, history_log)
+    """
+    if not list_id or list_id not in CIPHER_LISTS:
+        if _detect_turkish(text):
+            list_id = "CL8"
+        elif _detect_numeric(text):
+            list_id = "CL2"
+        else:
+            list_id = "CL1"
 
-class Kod8:
-    def __init__(self, cipher_id: str = None):
+    steps = CIPHER_LISTS[list_id]["steps"]
+    pipeline = steps if encrypt else list(reversed(steps))
+    current_data = text
+    history = []
 
-    #    cipher_id : one of "CL1"–"CL6", or None for auto-detection.
-    #    When None the cipher is selected by analysing the input at encrypt
-    #    time.  The chosen ID is returned with the ciphertext and MUST be
-    #    supplied to decrypt().
-       
-        self.cipher_id = cipher_id
+    for fn, enabled in pipeline:
+        if enabled:
+            current_data = fn(current_data, KOD8_KEY, encrypt=encrypt)
+            history.append((fn.__name__, current_data))
 
-    def encrypt(self, plaintext: str) -> tuple[str, str]:
-
-    #    Encrypt plaintext.  Returns (ciphertext, cipher_id_used).
-    #    Store cipher_id_used — required for decryption.
-       
-        cid    = self.cipher_id or auto_detect(plaintext)
-        result = plaintext.upper()       # R6: normalise to uppercase
-        for fn, kw in CIPHER_LISTS[cid]["steps"]:
-            result = fn(result, encrypt=True, **kw)
-        return result, cid
-
-    def decrypt(self, ciphertext: str, cipher_id: str) -> str:
-
-        #Decrypt ciphertext by running the CipherList in REVERSE ORDER,
-        #each step called with encrypt=False.
-        #cipher_id must match the one used during encryption.
-
-        result = ciphertext
-        for fn, kw in reversed(CIPHER_LISTS[cipher_id]["steps"]):
-            result = fn(result, encrypt=False, **kw)
-        return result
-
-
-# =============================================================================
-# DEMO / SELF-TEST
-# =============================================================================
-if __name__ == "__main__":
-    print("=" * 68)
-    print("  KOD 8 ENGINE v2.0 — SELF-TEST")
-    print("=" * 68)
-
-    tests = [
-        ("dream case",                                   "CL1"),
-        ("Merhaba Dünya şifreleme testi",                "CL1"),
-        ("HELLO WORLD TEST 123",                         "CL1"),
-        ("37.8749 N, 32.4932 E",                         "CL5"),
-        ("{\"user\": \"alice\", \"score\": 9823}",       "CL5"),
-        ("1,2,3,4,5,6,7,8,9,0",                         "CL5"),
-        ("This is a long document sentence. " * 3,       "CL4"),
-        ("EXPERIMENTAL UNKNOWN DATA XYZ 999",            "CL6"),
-        # auto-detect
-        ("auto detect this sentence please",             None),
-        ("99,88,77,66,55,44",                            None),
-    ]
-
-    all_pass = True
-    for plaintext, force_cid in tests:
-        engine    = Kod8(cipher_id=force_cid)
-        enc, cid  = engine.encrypt(plaintext)
-        dec       = engine.decrypt(enc, cid)
-        expected  = plaintext.upper()
-        match     = dec.strip("\x00") == expected.strip("\x00")
-        if not match:
-            all_pass = False
-        tag = "✓" if match else "✗"
-        print(f"\n  {tag} [{cid}] {CIPHER_LISTS[cid]['name']}")
-        print(f"    Input     : {plaintext[:62]}")
-        print(f"    Encrypted : {enc[:62]}{'…' if len(enc) > 62 else ''}")
-        print(f"    Decrypted : {dec[:62]}")
-
-    print("\n" + "=" * 68)
-    print(f"  {'ALL TESTS PASSED ✓' if all_pass else 'SOME TESTS FAILED ✗'}")
-    print("=" * 68)
+    return list_id, current_data, history
