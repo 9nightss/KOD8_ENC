@@ -1,11 +1,8 @@
 #!/usr/bin/env python3
-# KOD 8 PRO — Universal Strategic Cipher
-# Single-window form UI built with tkinter (zero external dependencies).
-# Place in the same folder as kod8_engine.py, then run:
 
-
-# To Run: python kod8_ui.py
-
+# =============================================================================
+# KOD 8
+# =============================================================================
 
 import tkinter as tk
 from tkinter import filedialog, messagebox
@@ -17,7 +14,7 @@ import time
 
 # ── engine ───────────────────────────────────────────────────────────────────
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from kod8_engine import Kod8, CIPHER_LISTS, auto_detect, KOD8_KEY
+from kod8_engine import run_kod8_pipeline, CIPHER_LISTS, KOD8_KEY, _detect_turkish, _detect_numeric
 
 # ═════════════════════════════════════════════════════════════════════════════
 # PALETTE
@@ -51,33 +48,50 @@ FONT_BTN      = ("Consolas", 12, "bold")
 FONT_STEP     = ("Consolas", 11)
 
 CL_STRATEGY = {
-    "CL1": "STRATEGY\nPLAIN TEXT",
-    "CL2": "STRATEGY\nIMAGE FILE",
-    "CL3": "STRATEGY\nVIDEO",
-    "CL4": "STRATEGY\nDOCUMENT",
-    "CL5": "STRATEGY\nNUMERIC DATA",
-    "CL6": "STRATEGY\nEXPERIMENTAL",
+    "CL1": "STRATEGY\nASCII PLAIN TEXT",
+    "CL2": "STRATEGY\nNUMERIC STRINGS",
+    "CL3": "STRATEGY\nDOCUMENT FILES",
+    "CL4": "STRATEGY\nIMAGE DATA",
+    "CL5": "STRATEGY\nVIDEO DATA",
+    "CL6": "STRATEGY\nFALLBACK ENGINE 1",
+    "CL7": "STRATEGY\nFALLBACK ENGINE 2",
+    "CL8": "STRATEGY\nTURKISH SPECIAL CHARS",
 }
 
 STEP_META = {
-    "op_hex":           "HEX Encoding",
-    "op_base64":        "Base64 Encoding",
-    "op_xor_key":       "XOR Key Byte [8]",
-    "op_rolling_xor":   "Rolling XOR (CBC)",
-    "op_keystream_xor": "Key-Stream XOR (LCG)",
-    "op_vigenere_tr":   "Vigenere — Turkish Alpha",
-    "op_atbash_tr":     "Atbash Mirror",
-    "op_unicode_shift": "Unicode Codepoint +5",
-    "op_sbox":          "S-Box Permutation",
-    "op_rail_fence":    "Rail-Fence Transposition",
-    "op_block_rotate":  "Block Rotation",
-    "op_split_reverse": "Split & Reverse",
-    "op_full_reverse":  "Full Reverse",
-    "op_columnar":      "Columnar Transposition",
-    "op_block_shuffle": "Block Shuffle",
-    "op_block_xor_cbc": "Block XOR (CBC Mode)",
-    "op_base36":        "Base-36 Digit Sub",
+    "op_mlkem_encap":          "ML-KEM Post-Quantum Lattice (Node 8)",
+    "op_blake3_seed_prep":     "BLAKE3 Dynamic Seed Prep (Node 8)",
+    "op_turkish_normalize":    "Turkish Character Set Normalize (Node 8)",
+    "op_rocca_s_stream":       "Rocca-S SIMD Stream Transformation (Node 6)",
+    "op_galois_field_mult":    "GF(2^8) Galois Field Modulation (Node 6)",
+    "op_dynamic_split":        "Inter-Block Positional Split (Node 2)",
+    "op_base36_pack":          "Base36 Integer Transposition (Node 2)",
+    "op_glevian_block":        "Glevian Block Matrix Mutation (Node 4)",
+    "op_vigornian_sub":        "Vigornian State-Mutating Sub (Node 7)",
+    "op_aegis256x":            "AEGIS-256X Extended Permutation (Node 9)",
+    "op_prime_affine_transform":"Prime Modulo (p=257) Affine Shift (Node 9)",
+    "op_ascon128_sponge":      "Ascon-128 Lightweight Sponge Diffusion (Node 3)",
+    "op_full_reverse":         "Terminal Script Reversal (Node 1)",
 }
+
+
+def auto_detect(sample_or_path: str, is_file: bool = False) -> str:
+    """Helper dispatcher for strategy UI previews."""
+    if is_file:
+        ext = sample_or_path.lower().split(".")[-1]
+        if ext in ["pdf", "docx", "doc", "txt", "xlsx", "pptx", "odt"]:
+            return "CL3"
+        elif ext in ["png", "jpg", "jpeg", "bmp", "webp", "gif", "svg"]:
+            return "CL4"
+        elif ext in ["mp4", "mkv", "avi", "mov", "webm", "flv"]:
+            return "CL5"
+        return "CL6"
+    else:
+        if _detect_turkish(sample_or_path):
+            return "CL8"
+        elif _detect_numeric(sample_or_path):
+            return "CL2"
+        return "CL1"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -98,11 +112,11 @@ class HoverButton(tk.Button):
 # APPLICATION
 # ═════════════════════════════════════════════════════════════════════════════
 
-class Kod8ProApp(tk.Tk):
+class Kod8enc(tk.Tk):
 
     def __init__(self):
         super().__init__()
-        self.title("KOD 8 PRO - Universal Strategic Cipher")
+        self.title("KOD 8 - Multi Layer Based Cipher Engine")
         self.configure(bg=BG_WINDOW)
         self.geometry("1120x960")
         self.minsize(860, 780)
@@ -169,7 +183,7 @@ class Kod8ProApp(tk.Tk):
         self._set_data_text("[NO FILE LOADED]", FG_DIM)
         self._data_text.bind("<FocusIn>", self._data_focus_in)
 
-        # ── 3. Strategy  /  Progress row ──────────────────────────────────
+        # ── 3. Strategy / Progress row ──────────────────────────────────
         sp = tk.Frame(self, bg=BG_WINDOW)
         sp.pack(fill="x", padx=16, pady=(0, 8))
         sp.columnconfigure(0, weight=1, uniform="half")
@@ -202,7 +216,7 @@ class Kod8ProApp(tk.Tk):
 
         hdr = tk.Frame(verif, bg=SEPARATOR)
         hdr.pack(fill="x")
-        tk.Label(hdr, text="STEP-BY-STEP VERIFICATION",
+        tk.Label(hdr, text="Process Cycle",
                  font=FONT_MONO_B, fg=FG_WHITE,
                  bg=SEPARATOR, pady=8).pack()
 
@@ -331,9 +345,9 @@ class Kod8ProApp(tk.Tk):
                 ("All files",       "*.*"),
                 ("KOD8 encrypted",  "*.kod8"),
                 ("Text files",      "*.txt *.md *.csv *.json"),
-                ("Images",          "*.png *.jpg *.jpeg *.webp *.gif *.bmp"),
-                ("Video",           "*.mp4 *.mkv *.avi *.mov *.webm"),
-                ("Documents",       "*.pdf *.docx"),
+                ("Images",          "*.png *.jpg *.jpeg *.webp *.gif *.bmp *.svg"),
+                ("Video",           "*.mp4 *.mkv *.avi *.mov *.webm *.flv"),
+                ("Documents",       "*.pdf *.docx *.doc *.xlsx *.pptx *.odt"),
             ],
         )
         if not path:
@@ -361,10 +375,7 @@ class Kod8ProApp(tk.Tk):
                 self._set_data_text("[COMPLIED BINARY DATA]", FG_DIM)
 
             # preview strategy
-            sample = (base64.b64encode(self._file_bytes[:64]).decode()
-                      if self._file_is_bin
-                      else content[:500])
-            cid = auto_detect(sample)
+            cid = auto_detect(path if self._file_is_bin else content[:500], is_file=self._file_is_bin)
             self._strategy_var.set(CL_STRATEGY.get(cid, "STRATEGY\nAUTO DETECT"))
             self._reset_steps()
 
@@ -391,7 +402,7 @@ class Kod8ProApp(tk.Tk):
                     "Upload a file or type text in the input area first.")
                 return
 
-        cid = auto_detect(text[:500])
+        cid = auto_detect(self._file_path if (self._file_bytes and self._file_is_bin) else text[:500], is_file=self._file_is_bin)
         self._strategy_var.set(CL_STRATEGY.get(cid, "STRATEGY\nAUTO DETECT"))
         self._reset_steps()
         self._set_buttons("disabled")
@@ -402,15 +413,14 @@ class Kod8ProApp(tk.Tk):
 
         def _worker():
             try:
-                k = Kod8()
-                enc, used_cid = k.encrypt(text)
+                used_cid, enc, history = run_kod8_pipeline(text, is_file=self._file_is_bin, encrypt=True, list_id=cid)
                 n = len(steps_names)
                 for i, name in enumerate(steps_names):
                     self.after(0, self._set_step, i,
-                               f"Step {i+1}: Layer {name}  [", FG_DIM)
+                               f"Step {i+1}: {name}  [", FG_DIM)
                     time.sleep(0.10)
                     self.after(0, self._set_step, i,
-                               f"Step {i+1}: Layer {name}  [\u2714]", FG_GREEN)
+                               f"Step {i+1}: {name}  [\u2714]", FG_GREEN)
                     self.after(0, self._progress_var.set, f"{i+1} / {n}")
                 self._enc_result = enc
                 self._enc_cid    = used_cid
@@ -491,13 +501,21 @@ class Kod8ProApp(tk.Tk):
                 n = len(steps_names)
                 for i, name in enumerate(steps_names):
                     self.after(0, self._set_step, i,
-                               f"Step {i+1}: Layer {name}  [", FG_DIM)
+                               f"Step {i+1}: {name}  [", FG_DIM)
                     time.sleep(0.09)
                     self.after(0, self._set_step, i,
-                               f"Step {i+1}: Layer {name}  [\u2714]", FG_GREEN)
+                               f"Step {i+1}: {name}  [\u2714]", FG_GREEN)
                     self.after(0, self._progress_var.set, f"{i+1} / {n}")
-                k   = Kod8(cipher_id=cid)
-                dec = k.decrypt(cipher_text, cid)
+                
+                _, dec, history = run_kod8_pipeline(cipher_text, is_file=False, encrypt=False, list_id=cid)
+                
+                # Check if payload was Base64 binary
+                if self._file_is_bin:
+                    try:
+                        dec = base64.b64decode(dec).decode("latin1")
+                    except Exception:
+                        pass
+                
                 self.after(0, self._finish_decrypt, dec, cid)
             except Exception as e:
                 self.after(0, self._on_error, str(e))
@@ -519,10 +537,8 @@ class Kod8ProApp(tk.Tk):
                 f"Decryption complete  [{cid}].\n\nSave the decrypted output to a file?"):
             return
 
-        # build a sensible default filename by stripping _enc / .kod8 from source
         if self._file_path:
             base = os.path.basename(self._file_path)
-            # strip known suffixes
             for suffix in ("_enc.kod8", ".kod8", "_enc"):
                 if base.endswith(suffix):
                     base = base[: -len(suffix)]
@@ -535,10 +551,10 @@ class Kod8ProApp(tk.Tk):
             title="Save decrypted file",
             initialfile=default_name,
             filetypes=[
-                ("Text files",  "*.txt"),
-                ("All files",   "*.*"),
-                ("JSON",        "*.json"),
-                ("CSV",         "*.csv"),
+                ("Text files",   "*.txt"),
+                ("All files",    "*.*"),
+                ("JSON",         "*.json"),
+                ("CSV",          "*.csv"),
             ],
             defaultextension=".txt",
         )
@@ -546,7 +562,9 @@ class Kod8ProApp(tk.Tk):
             return
 
         try:
-            with open(path, "w", encoding="utf-8") as f:
+            mode = "wb" if isinstance(dec, bytes) else "w"
+            encoding = None if isinstance(dec, bytes) else "utf-8"
+            with open(path, mode, encoding=encoding) as f:
                 f.write(dec)
             self._selected_var.set(f"Saved: {os.path.basename(path)}")
         except Exception as e:
@@ -564,12 +582,12 @@ class Kod8ProApp(tk.Tk):
         dlg.grab_set()
 
         tk.Label(dlg,
-                 text="Which cipher was used to encrypt this file?",
+                 text="Which cipher list was used to encrypt this file?",
                  font=FONT_MONO_SM, fg=FG_WHITE,
                  bg=BG_WINDOW, padx=16).pack(anchor="w", pady=(14, 6))
 
         var = tk.StringVar(value="CL1")
-        for cid in ["CL1", "CL2", "CL3", "CL4", "CL5", "CL6"]:
+        for cid in ["CL1", "CL2", "CL3", "CL4", "CL5", "CL6", "CL7", "CL8"]:
             name = CIPHER_LISTS[cid]["name"]
             tk.Radiobutton(
                 dlg,
@@ -623,5 +641,5 @@ class Kod8ProApp(tk.Tk):
 # ═════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
-    app = Kod8ProApp()
+    app = Kod8enc()
     app.mainloop()
