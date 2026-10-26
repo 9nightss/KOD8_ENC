@@ -1,92 +1,57 @@
-# KOD8_ENC
+# KOD8_ENC (v2.1)
 
-KOD 8 is a multi-layered obfuscation and encryption engine designed for high-diffusion data protection. Unlike standard single-algorithm ciphers, KOD 8 utilizes a Strategic Chain Architecture, applying exactly eight distinct, reversible transformations based on the detected or specified input type.
+KOD 8 is a multi-layered cryptographic obfuscation and pipeline engine designed for structured data protection. Unlike standard single-algorithm ciphers, KOD 8 utilizes a Strategic Chain Architecture, routing input through one of eight specialized CipherLists, each composing exactly eight reversible node transformations driven by a byte-level master key (`86247931`).
 
-More Features
+## Key Features
 
-    Strategic Auto-Detection: The engine analyzes input headers and entropy to automatically select the most effective cipher list (Text, Image, Video, Document, Numeric, or Experimental).
-    
-Uses a base function, works simply as:  
+* **Strategic Auto-Detection:** Automatically inspects input headers and character sets to select the optimal cipher list (`CL1` through `CL8`).
+* **8-Round Pipeline Logic:** Every payload passes through exactly 8 transformation nodes. Decryption is achieved by running the identical chain in precise reverse order.
+* **Robust Turkish Special Character Support:** Features reversible character normalization (`op_turkish_normalize`) using an escape sequence architecture (`~`) to safely handle Turkish diacritics (`ç, ğ, ı, ö, ş, ü, Ç, Ğ, İ, Ö, Ş, Ü`).
+* **Zero-Dependency GUI:** Built using Python's standard `tkinter` library with high-DPI scaling support.
+* **Strict Validation & Error Handling:** Validates base64 encoding and UTF-8 integrity during decryption to fail loudly on wrong keys or malformed ciphertexts rather than returning silent garbage.
 
-     F(x) = 1(3(9(7(4(2(6(8*x)))))))  
-    
-    8-Round Chain Logic: Every piece of data passes through exactly 8 operations. Decryption is achieved by running the identical chain in perfect reverse.
+---
 
-    Turkish Alphabet Support: Specialized Vigenere and Atbash operations that respect the unique character set of the Turkish language (ABCÇDEFGĞHİIJKLMNOÖPRSŞTUÜVYZ).
+## Architecture & Cipher Strategies
 
-    Zero-Dependency UI: A professional, high-contrast Tkinter interface built entirely on the Python Standard Library.
+The system consists of two primary modules:
+1. `kod8_engine.py`: The cryptographic core containing byte-level stream/block operations, node wrappers, and the 8 defined CipherLists (`CL1`–`CL8`).
+2. `kod8_ui.py`: The desktop control interface providing real-time step verification, binary file handling, and rounded UI components.
 
-    Deterministic Security: Features a Fisher-Yates shuffled S-Box and a Linear Congruential Generator (LCG) keystream, both seeded by a customizable master key.
+### The 8 Cipher Lists
 
-Architecture
+| ID | Name | Targeted Data | Primary Focus |
+| :--- | :--- | :--- | :--- |
+| **CL1** | ASCII Plain Text | Standard prose / ASCII | ML-KEM/Rocca-S stream diffusion & block splitting |
+| **CL2** | Numeric Strings | Numbers, GPS, counters | BLAKE3 prep, GF(2^8) field mod & base-36 pack |
+| **CL3** | Document Files | PDF, DOCX, TXT | Stream-heavy cascade & base-36 transposition |
+| **CL4** | Image Data | PNG, JPG, WebP | Dynamic block split & multi-stream XOR permutation |
+| **CL5** | Video Data | MP4, MKV, AVI | Galois field multiplication & prime affine shifts |
+| **CL6** | Fallback Engine 1 | Mixed / General binary | Combined BLAKE3, Rocca-S, and Affine transforms |
+| **CL7** | Fallback Engine 2 | Alternate binary | ML-KEM encapsulation & Galois modulation |
+| **CL8** | Turkish Special Chars | Turkish language text | Reversible escape-map normalization + stream diffusion |
 
-The system is divided into two primary modules:
+---
 
-    kod8_engine.py: The cryptographic core containing the primitive operations (S-Box, XOR cascades, Columnar transpositions, etc.) and the 6 defined CipherLists.
+## Pipeline Node Operations
 
-    kod8_ui.py: The frontend controller providing real-time verification of each encryption layer.
+KOD 8 utilizes 13 distinct modular transformation nodes across 6 functional families:
 
-The 6 Cipher Strategies
+* **Key-Derived / Hashing Streams:** `op_mlkem_encap` (SHA-256), `op_blake3_seed_prep` (BLAKE2b/BLAKE3), `op_rocca_s_stream` (SHA-512), `op_aegis256x` (SHA-256 + salt), `op_ascon128_sponge` (MD5).
+* **Mathematical & Field Modulation:** `op_galois_field_mult` (Mod-256 multiplication with odd inversion), `op_prime_affine_transform` (mod-256 affine shift).
+* **Positional & Block Transposition:** `op_dynamic_split` (inter-block positional split), `op_full_reverse` (terminal script reversal).
+* **Substitution & Shifting:** `op_base36_pack` (+36 shift), `op_vigornian_sub` (+7 shift), `op_glevian_block` (`\xAA` XOR matrix mutation).
+* **Normalization:** `op_turkish_normalize` (escaped diacritic mapping).
 
-ID	Name	Targeted Data	Primary Focus
-CL1	Plain Text	Human-readable prose	Turkish-aware substitution & linguistic diffusion.
-CL2	Image Files	PNG, JPG, WebP	Binary-safe S-Box layers & block shuffling.
-CL3	Video Files	MP4, MKV, AVI	Stream-XOR heavy to break long repeating patterns.
-CL4	Documents	PDF, DOCX, TXT	Structure-breaking columnar transpositions.
-CL5	Numeric/Data	JSON, CSV, Coords	Base-36 transformation to eliminate decimal patterns.
-CL6	Experimental	Mixed/Unknown	Maximum obfuscation using all primitive families.
+---
 
-Getting Started
-Prerequisites
+## Getting Started & Usage
 
-    Python 3.8 or higher.
+### Prerequisites
+* Python 3.8 or higher (No external dependencies required).
 
-    No external libraries (like pip install) are required.
-
-Installation
-
-    Save kod8_engine.py and kod8_ui.py in the same directory.
-
-    (Optional) Open kod8_engine.py and modify the KOD8_KEY variable to your own custom 8-digit numeric string.
-
-Usage
-
-Run the UI via your terminal: 
-python kod8_ui.py
-
-
-Tutorial
-
-    Upload: Click "UPLOAD / BROWSE" to load a file, or type directly into the text area.
-
-    Encrypt: Press "ENCRYPT". The UI will visually "check off" each of the 8 layers as they are applied.
-
-    Save: After encryption, you can save the result as a .kod8 file. This file contains a header identifying which cipher_id was used.
-
-    Decrypt: Load a .kod8 file. If the header is missing, the UI will prompt you to select the original strategy used.
-
-Primitive Operations
-
-KOD 8 uses a variety of mathematical and positional primitives:
-
-    Substitution: S-Box (bijective byte mapping), Vigenere (polyalphabetic), Atbash (mirror), and Base-36 digit shifting.
-
-    Transposition: Rail-Fence (zigzag), Columnar (grid-based), Block Shuffle (key-derived chunk reordering), and circular Block Rotation.
-
-    Diffusion: Rolling XOR (CBC-style byte chaining) and Block XOR Cascade (CBC-style block chaining).
-
-    Encoding: Hex and Base64 normalization.
-
-Chain Safety Rules (R1–R6)
-
-To ensure 100% reversibility without data corruption, the engine enforces strict safety rules:
-
-    R4 (Unicode Constraint): unicode_shift never precedes Turkish-alphabet operations to prevent "breaking" the character mapping.
-
-    R6 (Normalization): All text input is normalized to uppercase before the first step to ensure substitution consistency.
-
-    Binary Integrity: Image and Video lists (CL2, CL3) utilize Base64 as the primary entry point to ensure binary payloads remain printable throughout the chain.
-
-License
-
-This project is provided for educational and obfuscation purposes.
+### Running the UI
+1. Place `kod8_engine.py` and `kod8_ui.py` in the same directory.
+2. Execute the desktop interface:
+   ```bash
+   python kod8_ui.py
