@@ -1,248 +1,171 @@
 #!/usr/bin/env python3
-# =============================================================================
-# KOD 8  (corrected backend)
-# =============================================================================
-# Fixes vs. original:
-#   1. op_turkish_normalize was lossy: decrypt turned EVERY ASCII c/g/i/o/s/u
-#      (and C/G/I/O/S/U) into a Turkish letter. Now uses a reversible
-#      escape scheme ("~" + letter, with "~" escaped as "~~").
-#   2. op_galois_field_mult crashed on decrypt whenever the derived multiplier
-#      was even (no inverse mod 256). Multiplier is now forced odd. The value
-#      for the current key (57) is unchanged. NOTE: this is multiplication
-#      mod 256, not GF(2^8); the comment now says so.
-#   3. Decrypt silently decoded with errors="replace", hiding wrong-key /
-#      wrong-list failures as corrupted text. Now strict + clear ValueError.
-#   4. Decrypt without list_id silently fell back to CL1 (ciphertext is
-#      base64, so detection can never work). Now raises instead of returning
-#      garbage.
-#   5. base64 decoding is validated (validate=True) so malformed input fails
-#      loudly instead of being silently stripped.
-#   6. _detect_numeric used str.isdigit(), which accepts non-ASCII digits
-#      such as "²"; now ASCII-only.
-#   7. Comment fixes: "p=257 affine" op is really a +13 shift mod 256.
-# =============================================================================
-
+import os
+import zlib
 import base64
 import hashlib
+import hmac
+import re
+from typing import Tuple, Optional
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.hazmat.primitives import hashes
+import pgpy
 
 # ── Global Key Config ────────────────────────────────────────────────────────
 KOD8_KEY = b"86247931"
 
-
-# ── Helper Detection Functions ───────────────────────────────────────────────
-def _detect_turkish(text: str) -> bool:
-    turkish_chars = set("çğıöşüÇĞİÖŞÜ")
-    return any(c in turkish_chars for c in text)
-
-
-def _detect_numeric(text: str) -> bool:
-    t = text.strip()
-    return t.isascii() and t.isdigit()
-
-
-# ── Shared byte-level helpers ────────────────────────────────────────────────
-def _to_bytes(data: str, encrypt: bool) -> bytes:
-    if encrypt:
-        return data.encode("utf-8")
-    try:
-        return base64.b64decode(data, validate=True)
-    except Exception as e:
-        raise ValueError(f"KOD8: ciphertext is not valid base64 at this stage "
-                         f"(wrong list_id or corrupted input): {e}") from None
-
-
-def _from_bytes(out: bytes, encrypt: bool) -> str:
-    if encrypt:
-        return base64.b64encode(bytes(out)).decode("ascii")
-    try:
-        return bytes(out).decode("utf-8")
-    except UnicodeDecodeError as e:
-        raise ValueError(f"KOD8: decrypted bytes are not valid UTF-8 "
-                         f"(wrong key/list_id or corrupted input): {e}") from None
-
-
-def _xor_stream(data: str, stream: bytes, encrypt: bool) -> str:
-    raw = _to_bytes(data, encrypt)
-    return _from_bytes(bytearray(b ^ stream[i % len(stream)] for i, b in enumerate(raw)), encrypt)
-
-
-def _add_shift(data: str, n: int, encrypt: bool) -> str:
-    raw = _to_bytes(data, encrypt)
-    return _from_bytes(bytearray(((b + n) if encrypt else (b - n)) % 256 for b in raw), encrypt)
-
-
-# ── Primitive Operations ─────────────────────────────────────────────────────
-def op_mlkem_encap(data: str, key: bytes, encrypt: bool = True) -> str:
-    # (Label only: SHA-256-derived repeating XOR keystream, not ML-KEM.)
-    return _xor_stream(data, hashlib.sha256(key).digest(), encrypt)
-
-
-def op_blake3_seed_prep(data: str, key: bytes, encrypt: bool = True) -> str:
-    # (Label only: BLAKE2b-128-derived repeating XOR keystream.)
-    return _xor_stream(data, hashlib.blake2b(key, digest_size=16).digest(), encrypt)
-
-
-# Reversible Turkish normalization: "~" is the escape character.
-_TR_MAP = {"ç": "c", "ğ": "g", "ı": "i", "ö": "o", "ş": "s", "ü": "u",
-           "Ç": "C", "Ğ": "G", "İ": "I", "Ö": "O", "Ş": "S", "Ü": "U"}
-_TR_INV = {v: k for k, v in _TR_MAP.items()}
-
-
-def op_turkish_normalize(data: str, key: bytes, encrypt: bool = True) -> str:
-    if encrypt:
-        out = []
-        for c in data:
-            if c == "~":
-                out.append("~~")
-            elif c in _TR_MAP:
-                out.append("~" + _TR_MAP[c])
-            else:
-                out.append(c)
-        return "".join(out)
-    out, i, n = [], 0, len(data)
-    while i < n:
-        c = data[i]
-        if c != "~":
-            out.append(c)
-            i += 1
-            continue
-        if i + 1 >= n:
-            raise ValueError("KOD8: dangling escape in Turkish-normalized text")
-        nxt = data[i + 1]
-        if nxt == "~":
-            out.append("~")
-        elif nxt in _TR_INV:
-            out.append(_TR_INV[nxt])
-        else:
-            raise ValueError(f"KOD8: invalid escape '~{nxt}' in Turkish-normalized text")
-        i += 2
-    return "".join(out)
-
-
-def op_rocca_s_stream(data: str, key: bytes, encrypt: bool = True) -> str:
-    # (Label only: SHA-512-derived repeating XOR keystream.)
-    return _xor_stream(data, hashlib.sha512(key).digest(), encrypt)
-
-
-def op_galois_field_mult(data: str, key: bytes, encrypt: bool = True) -> str:
-    # Multiplication mod 256 (NOT GF(2^8)). Multiplier must be odd to be invertible.
-    mult = (key[0] % 254) + 1
-    if mult % 2 == 0:
-        mult += 1                      # 2..254 -> 3..255, always odd, <= 255
-    inv = pow(mult, -1, 256)
-    raw = _to_bytes(data, encrypt)
-    k = mult if encrypt else inv
-    return _from_bytes(bytearray((b * k) % 256 for b in raw), encrypt)
-
-
-def op_dynamic_split(data: str, key: bytes, encrypt: bool = True) -> str:
-    if len(data) < 2:
-        return data
-    mid = len(data) // 2
-    if encrypt:
-        return data[mid:] + data[:mid]
-    rem = len(data) - mid
-    return data[rem:] + data[:rem]
-
-
-def op_base36_pack(data: str, key: bytes, encrypt: bool = True) -> str:
-    # (Label only: +36 byte shift mod 256.)
-    return _add_shift(data, 36, encrypt)
-
-
-def op_glevian_block(data: str, key: bytes, encrypt: bool = True) -> str:
-    return _xor_stream(data, b"\xAA", encrypt)
-
-
-def op_vigornian_sub(data: str, key: bytes, encrypt: bool = True) -> str:
-    return _add_shift(data, 7, encrypt)
-
-
-def op_aegis256x(data: str, key: bytes, encrypt: bool = True) -> str:
-    # (Label only: SHA-256(key+"_aegis") repeating XOR keystream.)
-    return _xor_stream(data, hashlib.sha256(key + b"_aegis").digest(), encrypt)
-
-
-def op_prime_affine_transform(data: str, key: bytes, encrypt: bool = True) -> str:
-    # (Label only: +13 byte shift mod 256, not a p=257 affine map.)
-    return _add_shift(data, 13, encrypt)
-
-
-def op_ascon128_sponge(data: str, key: bytes, encrypt: bool = True) -> str:
-    # (Label only: MD5-derived repeating XOR keystream.)
-    return _xor_stream(data, hashlib.md5(key).digest(), encrypt)
-
-
-def op_full_reverse(data: str, key: bytes, encrypt: bool = True) -> str:
-    return data[::-1]
-
-
-# ── Strategy Matrix Definition (CL1 - CL8) ──────────────────────────────────
-CIPHER_LISTS = {
-    "CL1": {"name": "ASCII PLAIN TEXT", "steps": [
-        (op_mlkem_encap, True), (op_rocca_s_stream, True), (op_dynamic_split, True),
-        (op_glevian_block, True), (op_vigornian_sub, True), (op_aegis256x, True),
-        (op_ascon128_sponge, True), (op_full_reverse, True)]},
-    "CL2": {"name": "NUMERIC STRINGS", "steps": [
-        (op_blake3_seed_prep, True), (op_galois_field_mult, True), (op_base36_pack, True),
-        (op_glevian_block, True), (op_vigornian_sub, True), (op_prime_affine_transform, True),
-        (op_ascon128_sponge, True), (op_full_reverse, True)]},
-    "CL3": {"name": "DOCUMENT FILES", "steps": [
-        (op_mlkem_encap, True), (op_rocca_s_stream, True), (op_base36_pack, True),
-        (op_glevian_block, True), (op_vigornian_sub, True), (op_aegis256x, True),
-        (op_ascon128_sponge, True), (op_full_reverse, True)]},
-    "CL4": {"name": "IMAGE DATA", "steps": [
-        (op_blake3_seed_prep, True), (op_rocca_s_stream, True), (op_dynamic_split, True),
-        (op_glevian_block, True), (op_vigornian_sub, True), (op_aegis256x, True),
-        (op_ascon128_sponge, True), (op_full_reverse, True)]},
-    "CL5": {"name": "VIDEO DATA", "steps": [
-        (op_mlkem_encap, True), (op_galois_field_mult, True), (op_dynamic_split, True),
-        (op_glevian_block, True), (op_vigornian_sub, True), (op_prime_affine_transform, True),
-        (op_ascon128_sponge, True), (op_full_reverse, True)]},
-    "CL6": {"name": "FALLBACK ENGINE 1", "steps": [
-        (op_blake3_seed_prep, True), (op_rocca_s_stream, True), (op_base36_pack, True),
-        (op_glevian_block, True), (op_vigornian_sub, True), (op_prime_affine_transform, True),
-        (op_ascon128_sponge, True), (op_full_reverse, True)]},
-    "CL7": {"name": "FALLBACK ENGINE 2", "steps": [
-        (op_mlkem_encap, True), (op_galois_field_mult, True), (op_base36_pack, True),
-        (op_glevian_block, True), (op_vigornian_sub, True), (op_aegis256x, True),
-        (op_ascon128_sponge, True), (op_full_reverse, True)]},
-    "CL8": {"name": "TURKISH SPECIAL CHARS", "steps": [
-        (op_turkish_normalize, True), (op_rocca_s_stream, True), (op_dynamic_split, True),
-        (op_glevian_block, True), (op_vigornian_sub, True), (op_aegis256x, True),
-        (op_ascon128_sponge, True), (op_full_reverse, True)]},
+STRATEGY_MAP = {
+    "CL1": "ASCII Plain Text",   "CL2": "Numeric Strings",
+    "CL3": "Document Files",     "CL4": "Image Data",
+    "CL5": "Video Data",         "CL6": "Fallback Engine 1",
+    "CL7": "Fallback Engine 2",  "CL8": "Turkish Special Chars",
 }
 
+_HDR_RE = re.compile(
+    r"^#\s*KOD8\s+cipher_id:\s*(CL\d+)\s+salt:\s*([A-Za-z0-9+/=]+)(?:\s+bin:\s*([01]))?(?:\s+ext:\s*(\S+))?\s*$"
+)
 
-# ── Pipeline Execution Entry Point ───────────────────────────────────────────
-def run_kod8_pipeline(text: str, is_file: bool = False, encrypt: bool = True,
-                      list_id: str = None, key: bytes = None) -> tuple:
-    """
-    Executes the 8-step transform pipeline for the specified strategy list.
-    Encrypt: list_id is auto-detected if omitted.
-    Decrypt: list_id is REQUIRED (ciphertext carries no hint about its list).
-    Returns: (strategy_id, resulting_text, history_log)
-    """
-    key = KOD8_KEY if key is None else key
+# ── Topological Primitives (Nodes) ───────────────────────────────────────────
 
-    if list_id is not None and list_id not in CIPHER_LISTS:
-        raise ValueError(f"KOD8: unknown list_id {list_id!r}")
-    if list_id is None:
-        if not encrypt:
-            raise ValueError("KOD8: list_id is required for decryption")
-        if _detect_turkish(text):
-            list_id = "CL8"
-        elif _detect_numeric(text):
-            list_id = "CL2"
-        else:
-            list_id = "CL1"
+def node_8_hkdf_expand(base_key: bytes, salt: bytes) -> Tuple[bytes, bytes]:
+    #Node 8: Key Expansion (HKDF-SHA-384). Returns (AES_KEY, HMAC_KEY)
+    hkdf = HKDF(
+        algorithm=hashes.SHA384(),
+        length=32 + 48,  # 32B for AES-256, 48B for HMAC-SHA-384
+        salt=salt,
+        info=b"KOD8-NCIA-COMPLIANT-PIPELINE"
+    )
+    key_material = hkdf.derive(base_key)
+    return key_material[:32], key_material[32:]
 
-    steps = CIPHER_LISTS[list_id]["steps"]
-    pipeline = steps if encrypt else list(reversed(steps))
-    current = text
-    history = []
-    for fn, enabled in pipeline:
-        if enabled:
-            current = fn(current, key, encrypt=encrypt)
-            history.append((fn.__name__, current))
-    return list_id, current, history
+def node_6_zlib_compress(data: bytes, compress: bool) -> bytes:
+    #Node 6: Data Preparation (Zlib / Deflate)
+    return zlib.compress(data, level=9) if compress else zlib.decompress(data)
+
+def node_2_pq_wrap(data: bytes, wrap: bool) -> bytes:
+    #Node 2: Post-Quantum Wrap (Placeholder for ML-KEM-768)
+    # In a full deployment, encapsulate/decapsulate a PQ session key here.
+    # For sandbox, we prepend a 32-byte dummy header to reserve the byte-space.
+    if wrap:
+        return (b"\x00" * 32) + data
+    return data[32:]
+
+def node_4_hmac_sign(data: bytes, hmac_key: bytes, sign: bool) -> bytes:
+    #Node 4: Plaintext Auth (HMAC-SHA-384)
+    h = hmac.new(hmac_key, digestmod=hashlib.sha384)
+    if sign:
+        h.update(data)
+        return h.digest() + data
+    expected_mac = data[:48]
+    payload = data[48:]
+    h.update(payload)
+    if not hmac.compare_digest(h.digest(), expected_mac):
+        raise ValueError("KOD8: Inner HMAC-SHA-384 verification failed.")
+    return payload
+
+def node_7_aes_gcm(data: bytes, aes_key: bytes, encrypt: bool) -> bytes:
+    #Node 7: Bulk Encryption (AES-256-GCM)
+    aesgcm = AESGCM(aes_key)
+    if encrypt:
+        nonce = os.urandom(12)
+        return nonce + aesgcm.encrypt(nonce, data, None)
+    nonce, ciphertext = data[:12], data[12:]
+    return aesgcm.decrypt(nonce, ciphertext, None)
+
+def node_9_framing(data: bytes, frame: bool) -> bytes:
+    #Node 9: Ciphertext Framing (Uniform Chunk Padding)
+    # Pads payload to nearest 1024 bytes to obscure original file size.
+    if frame:
+        pad_len = 1024 - (len(data) % 1024)
+        return data + (b"\x80" + b"\x00" * (pad_len - 1))
+    # Unframe
+    pad_idx = data.rfind(b"\x80")
+    if pad_idx == -1:
+        raise ValueError("KOD8: Framing validation failed.")
+    return data[:pad_idx]
+
+def node_3_outer_hash(data: bytes, hash_it: bool) -> bytes:
+    #Node 3: Outer Integrity (SHA-512)
+    if hash_it:
+        digest = hashlib.sha512(data).digest()
+        return digest + data
+    expected_digest, payload = data[:64], data[64:]
+    if hashlib.sha512(payload).digest() != expected_digest:
+        raise ValueError("KOD8: Outer SHA-512 integrity check failed.")
+    return payload
+
+def node_1_terminal_reverse(data: bytes, encode: bool) -> str:
+    #Node 1: Terminal Encoding (Base64 + Reversal)
+    if encode:
+        b64_str = base64.b64encode(data).decode("ascii")
+        return b64_str[::-1]  # The signature KOD8 reverse string trick
+    b64_str = data[::-1]
+    return base64.b64decode(b64_str, validate=True)
+
+# ── Pipeline Execution ───────────────────────────────────────────────────────
+
+def run_kod8_pipeline(data_str: str, is_file: bool = False, encrypt: bool = True,
+                      list_id: Optional[str] = "CL1", key: Optional[bytes] = None) -> Tuple[str, str, str, str]:
+    
+    # Executes the NCIA compliant 8-node pipeline.
+    # Returns: (list_id, salt_b64, is_bin_str, ext_str, final_body)
+    
+    active_key = KOD8_KEY if key is None else key
+
+    if encrypt:
+        raw_bytes = data_str.encode("utf-8") if not is_file else data_str
+        salt = os.urandom(16)
+        salt_b64 = base64.b64encode(salt).decode("ascii")
+        
+        aes_key, hmac_key = node_8_hkdf_expand(active_key, salt)
+        stage_6 = node_6_zlib_compress(raw_bytes, compress=True)
+        stage_2 = node_2_pq_wrap(stage_6, wrap=True)
+        stage_4 = node_4_hmac_sign(stage_2, hmac_key, sign=True)
+        stage_7 = node_7_aes_gcm(stage_4, aes_key, encrypt=True)
+        stage_9 = node_9_framing(stage_7, frame=True)
+        stage_3 = node_3_outer_hash(stage_9, hash_it=True)
+        final_body = node_1_terminal_reverse(stage_3, encode=True)
+        
+        return list_id, salt_b64, final_body
+        
+    else:
+        # data_str must be the reversed Base64 body ONLY. 
+        # Header parsing must happen before calling this in decryption mode.
+        salt = base64.b64decode(list_id.split(":")[1]) # Passing salt via hack for sandbox api parity
+        aes_key, hmac_key = node_8_hkdf_expand(active_key, salt)
+        
+        stage_3 = node_1_terminal_reverse(data_str, encode=False)
+        stage_9 = node_3_outer_hash(stage_3, hash_it=False)
+        stage_7 = node_9_framing(stage_9, frame=False)
+        stage_4 = node_7_aes_gcm(stage_7, aes_key, encrypt=False)
+        stage_2 = node_4_hmac_sign(stage_4, hmac_key, sign=False)
+        stage_6 = node_2_pq_wrap(stage_2, wrap=False)
+        final_bytes = node_6_zlib_compress(stage_6, compress=False)
+        
+        return final_bytes
+
+# ── Container & PGP Integrations ─────────────────────────────────────────────
+
+def format_kod8_file(cid: str, salt_b64: str, is_bin: bool, ext: str, body: str) -> str:
+    #Constructs the compliant `.kod8` file with the plaintext header
+    bin_flag = "1" if is_bin else "0"
+    ext_str = f"  ext: {ext}" if ext else ""
+    header = f"# KOD8  cipher_id: {cid}  salt: {salt_b64}  bin: {bin_flag}{ext_str}"
+    return f"{header}\n{body}"
+
+def generate_pgp_signature(kod8_filepath: str, private_key_path: str, passphrase: str = None) -> str:
+    #Generates a detached `.asc` OpenPGP signature for the final written KOD8 file
+    priv_key, _ = pgpy.PGPKey.from_file(private_key_path)
+    if passphrase and not priv_key.is_unlocked:
+        with priv_key.unlock(passphrase):
+            message = pgpy.PGPMessage.new(kod8_filepath, file=True)
+            signature = priv_key.sign(message)
+    else:
+        message = pgpy.PGPMessage.new(kod8_filepath, file=True)
+        signature = priv_key.sign(message)
+        
+    sig_path = f"{kod8_filepath}.asc"
+    with open(sig_path, "w") as f:
+        f.write(str(signature))
+        
+    return sig_path
