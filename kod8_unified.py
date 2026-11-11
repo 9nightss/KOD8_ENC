@@ -3,7 +3,10 @@
 # KOD 8 - Unified NCIA Sandbox (File/Text Cipher & Split-Key Disk Provisioning)
 # =============================================================================
 
+import dataclasses
+import json
 import os
+import platform
 import zlib
 import base64
 import hashlib
@@ -14,10 +17,13 @@ import queue
 import threading
 import subprocess
 import datetime
+from pathlib import Path
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, ttk, messagebox
 from typing import Tuple, Optional
+
+APP_DIR = Path(__file__).resolve().parent
 
 try:
     import psutil
@@ -103,33 +109,29 @@ def node_3_outer_hash(data: bytes, hash_it: bool) -> bytes:
         raise ValueError("KOD8: Outer SHA-512 integrity check failed.")
     return payload
 
-def node_1_terminal_reverse(data: str, encode: bool) -> bytes:
+def node_1_terminal_reverse(data, encode: bool):
     if encode:
         return base64.b64encode(data).decode("ascii")[::-1]
-    # Strip all whitespace/newlines before reversing and validating
     clean_data = re.sub(r'\s+', '', data)
     return base64.b64decode(clean_data[::-1], validate=True)
+
 # ── CL9: OEM Disk Provisioning Nodes ──────────────────────────────────────────
 
 def node_9_oem_framing(data_key: bytes, os_target: str) -> bytes:
-    """Formats the raw AES-256 key for the specific OEM bootloader."""
     if os_target == "Windows":
-        # .bek file metadata headers for BitLocker
         bek_header = b"\x2F\x42\x45\x4B\x00\x00\x00\x00" 
         return bek_header + data_key
     elif os_target == "Linux":
-        # Raw key for LUKS
         return data_key
     raise ValueError("Unsupported OEM target")
 
 def run_disk_provisioning(host_token: bytes, drive_token: bytes, os_target: str) -> bytes:
-    """Executes CL9: Generates the Master Unlock Key for Native OEM Ciphers."""
     aes_master_key, _ = node_8_hkdf_expand(base_key=host_token, salt=drive_token)
     return node_9_oem_framing(aes_master_key, os_target)
 
 # ── Standard Pipeline Execution (CL1-CL8) ──────────────────────────────────
-def run_kod8_pipeline(data_str: str, is_file: bool = False, encrypt: bool = True,
-                      list_id: Optional[str] = "CL1", key: Optional[bytes] = None) -> Tuple[str, str, list, str]:
+def run_kod8_pipeline(data_str, is_file: bool = False, encrypt: bool = True,
+                      list_id: Optional[str] = "CL1", key: Optional[bytes] = None):
     active_key = KOD8_KEY if key is None else key
     if encrypt:
         raw_bytes = data_str.encode("utf-8") if not is_file else data_str
@@ -151,10 +153,9 @@ def run_kod8_pipeline(data_str: str, is_file: bool = False, encrypt: bool = True
         ]
         return list_id, final_body, history, salt_b64
     else:
-        if ":" in list_id:
-            real_list_id, salt_b64 = list_id.split(":", 1)
-        else:
-             raise ValueError("KOD8: Decryption requires salt embedded in list_id string.")
+        if list_id is None or ":" not in list_id:
+            raise ValueError("KOD8: Decryption requires salt embedded in list_id string.")
+        real_list_id, salt_b64 = list_id.split(":", 1)
         salt = base64.b64decode(salt_b64)
         aes_key, hmac_key = node_8_hkdf_expand(active_key, salt)
         stage_3 = node_1_terminal_reverse(data_str, encode=False)
@@ -191,7 +192,6 @@ def parse_kod8(raw):
             cid, salt, is_bin_str, ext = m.group(1), m.group(2), m.group(3), m.group(4) or ""
             is_bin = is_bin_str == "1"
             lines = lines[1:]
-    # Join with an empty string, not "\n"
     return cid, is_bin, ext, salt, "".join(lines).strip()
 
 def auto_detect(sample_or_path, is_file=False):
@@ -203,51 +203,211 @@ def auto_detect(sample_or_path, is_file=False):
         return "CL6"
     return "CL1"
 
-# ── DISK PROVISIONING HELPERS ────────────────────────────────────────────────
-def get_removable_drives():
-    drives = []
-    partitions = psutil.disk_partitions(all=False)
-    for p in partitions:
-        if "removable" in p.opts.lower() and not p.device.startswith(('C:', 'X:')):
-            drives.append(p.device)
-    return drives
+# ── DISK PROVISIONING SAFETY LAYER ───────────────────────────────────────────
 
-def execute_disk_provisioning(drive_letter, os_target, log_callback):
-    """
-    WARNING: Demonstrative Logic. In production, this runs diskpart/cryptsetup.
-    Implements the CL9 Split-Key architecture securely.
-    """
-    log_callback(f"Starting Split-Key Provisioning for {drive_letter} on {os_target}...")
+@dataclasses.dataclass(frozen=True)
+class DriveSnapshot:
+    device_path: str
+    display_name: str
+    size_bytes: int
+    bus_type: str
+    is_removable: bool
+    is_system_or_boot: bool
+    mountpoints: tuple
+
+    def confirmation_token(self) -> str:
+        return self.device_path
+
+    def label(self) -> str:
+        return f"{self.display_name}  ({self.device_path}, {human_size(self.size_bytes)})"
+
+
+class DriveDetectionError(RuntimeError):
+    pass
+
+
+def _system_drive_windows() -> str:
+    drive = os.environ.get("SystemDrive", "C:").rstrip("\\").upper()
+    return drive if drive.endswith(":") else drive + ":"
+
+
+def _list_candidate_drives_windows():
+    system_drive = _system_drive_windows()
+    out = []
+    try:
+        partitions = psutil.disk_partitions(all=False)
+    except Exception as exc:
+        raise DriveDetectionError(f"psutil.disk_partitions() failed: {exc}") from exc
+
+    for p in partitions:
+        device = p.device.rstrip("\\")
+        opts = (p.opts or "").lower()
+        is_removable = "removable" in opts
+        is_system = (device.upper() == system_drive)
+        try:
+            usage = psutil.disk_usage(p.mountpoint)
+            size_bytes = usage.total
+        except OSError:
+            size_bytes = 0
+        out.append(DriveSnapshot(
+            device_path=device,
+            display_name=f"{device} volume ({p.fstype or 'unknown fs'})",
+            size_bytes=size_bytes,
+            bus_type="USB" if is_removable else "unknown",
+            is_removable=is_removable,
+            is_system_or_boot=is_system,
+            mountpoints=(p.mountpoint,),
+        ))
+    return out
+
+
+def _list_candidate_drives_linux():
+    try:
+        raw = subprocess.run(
+            ["lsblk", "-J", "-b", "-o", "NAME,PATH,SIZE,RM,TYPE,MOUNTPOINT,MODEL,SERIAL"],
+            capture_output=True, text=True, timeout=15, check=True,
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise DriveDetectionError(f"lsblk failed: {exc}") from exc
+    try:
+        tree = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise DriveDetectionError(f"Could not parse lsblk output: {exc}") from exc
+
+    protected_mounts = {"/", "/boot", "/boot/efi", "/home", "/var", "/usr", "[SWAP]"}
+    try:
+        swap_backing = {line.split()[0] for line in Path("/proc/swaps").read_text().splitlines()[1:]}
+    except OSError:
+        swap_backing = set()
+
+    out = []
+    for dev in tree.get("blockdevices", []):
+        if dev.get("type") != "disk":
+            continue
+        children = dev.get("children", []) or []
+        mountpoints = tuple(sorted({c["mountpoint"] for c in children if c.get("mountpoint")}
+                                    | ({dev["mountpoint"]} if dev.get("mountpoint") else set())))
+        child_paths = {c.get("path") for c in children} | {dev.get("path")}
+        is_system = (
+            bool(protected_mounts & set(mountpoints))
+            or bool(child_paths & swap_backing)
+            or not bool(dev.get("rm"))
+        )
+        out.append(DriveSnapshot(
+            device_path=dev.get("path", f"/dev/{dev.get('name')}"),
+            display_name=dev.get("model") or dev.get("name", "unknown"),
+            size_bytes=int(dev.get("size") or 0),
+            bus_type="USB" if dev.get("rm") else "unknown",
+            is_removable=bool(dev.get("rm")),
+            is_system_or_boot=is_system,
+            mountpoints=mountpoints,
+        ))
+    return out
+
+
+def list_candidate_drives():
+    system = platform.system()
+    if system == "Windows":
+        return _list_candidate_drives_windows()
+    if system == "Linux":
+        return _list_candidate_drives_linux()
+    raise DriveDetectionError(f"No drive enumeration implemented for platform: {system!r}")
+
+
+def safe_candidates():
+    drives = list_candidate_drives()
+    return [d for d in drives if d.is_removable and not d.is_system_or_boot]
+
+
+@dataclasses.dataclass(frozen=True)
+class ProvisioningPlan:
+    snapshot: DriveSnapshot
+    os_target: str
+    commands: tuple
+    warnings: tuple
+
+
+def plan_commands(snapshot, os_target):
+    warnings = []
+    if snapshot.is_system_or_boot:
+        warnings.append("REFUSED: this drive is flagged as a system/boot drive.")
     
-    # 1. Generate Tokens
+    # Under Linux, raw device nodes must not be actively mounted.
+    # Under Windows, psutil reports volume letters (e.g. D:), which inherently mount to D:\.
+    if os_target == "Linux" and snapshot.mountpoints:
+        warnings.append(f"REFUSED: drive currently has active mountpoint(s): {', '.join(snapshot.mountpoints)}")
+        
+    if not snapshot.is_removable:
+        warnings.append("REFUSED: drive is not flagged removable.")
+    if warnings:
+        return ProvisioningPlan(snapshot, os_target, commands=(), warnings=tuple(warnings))
+
+    if os_target == "Windows":
+        commands = (
+            f"diskpart (script): select volume {snapshot.device_path}, format fs=ntfs quick",
+            f"manage-bde -on {snapshot.device_path} -StartupKey <removable ignition volume path>",
+        )
+    elif os_target == "Linux":
+        commands = (
+            f"wipefs -a {snapshot.device_path}",
+            f"cryptsetup luksFormat {snapshot.device_path} --key-file <path to derived key material>",
+            f"cryptsetup open {snapshot.device_path} dilara_vol --key-file <path to derived key material>",
+            f"mkfs.ext4 /dev/mapper/dilara_vol",
+        )
+    else:
+        return ProvisioningPlan(snapshot, os_target, commands=(),
+                                 warnings=(f"REFUSED: unsupported os_target {os_target!r}",))
+    return ProvisioningPlan(snapshot, os_target, commands=commands,
+                             warnings=(f"DRY RUN ONLY - nothing above has been executed "
+                                       f"against {snapshot.device_path}.",))
+
+
+def confirms(snapshot, typed_text):
+    return typed_text.strip() == snapshot.confirmation_token()
+
+
+def _default_audit_path():
+    return APP_DIR / "data" / "disk_provision_audit.jsonl"
+
+
+def record_audit_event(event, snapshot=None, extra=None, path=None):
+    path = path or _default_audit_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "event": event,
+        "device_path": snapshot.device_path if snapshot else None,
+        "display_name": snapshot.display_name if snapshot else None,
+        "extra": extra or {},
+    }
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def execute_plan(plan, typed_confirmation, dry_run=True):
+    if plan.warnings and not plan.commands:
+        raise PermissionError(f"Plan was refused and carries no commands: {'; '.join(plan.warnings)}")
+    if not confirms(plan.snapshot, typed_confirmation):
+        record_audit_event("confirmation_mismatch", plan.snapshot)
+        raise PermissionError("Typed confirmation did not match the drive's device path exactly.")
+
+    if not dry_run:
+        raise NotImplementedError(
+            "Live execution is intentionally not implemented. See execute_plan()'s docstring - "
+            "wiring the commands above to real subprocess calls is a deliberate change to make yourself."
+        )
+
     host_token = os.urandom(64)
     drive_token = os.urandom(64)
-    
-    log_callback("Generated hardware/host entropy tokens (64-byte).")
-    
-    # 2. Derive Native Bootloader Key via CL9
-    boot_key = run_disk_provisioning(host_token, drive_token, os_target)
-    log_callback(f"CL9 Executed: HKDF Master Key formatted for {os_target} native block cipher.")
-    
-    # 3. Securely stash Host Token
-    host_stash_path = os.path.join(os.path.expanduser("~"), ".kod8_keys", f"{drive_letter[0]}_host.token")
-    os.makedirs(os.path.dirname(host_stash_path), exist_ok=True)
-    with open(host_stash_path, "wb") as f:
-        f.write(host_token)
-    log_callback(f"Saved Host Token to secure enclave: {host_stash_path}")
-    
-    # (Simulated) 4. Drive Formatting & Drive Token Stash
-    log_callback(f"Simulating diskpart: Creating 50MB Vol A (Ignition) and Vol B (Secure)...")
-    log_callback(f"Saved Drive Token to Ignition Volume.")
-    
-    # (Simulated) 5. OS Block Encryption Injection
-    if os_target == "Windows":
-        log_callback(f"Injecting .bek key into BitLocker (manage-bde -on {drive_letter} -StartupKey)...")
-    else:
-        log_callback(f"Piping raw key to LUKS (cryptsetup luksFormat)...")
-        
-    log_callback("PROVISIONING COMPLETE. Zero-Trust Split-Key active.")
-    return True
+    boot_key = run_disk_provisioning(host_token, drive_token, plan.os_target)
+    host_stash_path = APP_DIR / "data" / "kod8_keys" / f"{plan.snapshot.device_path.strip(chr(92)+'/.:')}_host.token"
+
+    record_audit_event("plan_confirmed", plan.snapshot,
+                        extra={"os_target": plan.os_target, "dry_run": dry_run,
+                               "commands": list(plan.commands),
+                               "host_token_bytes": len(host_token),
+                               "boot_key_bytes": len(boot_key)})
+    return {"host_stash_path": str(host_stash_path), "boot_key_bytes": len(boot_key), "executed": False}
 
 # ── UI COMPONENTS ────────────────────────────────────────────────────────────
 class C:
@@ -443,7 +603,6 @@ class App(tk.Tk):
         self.S = max(1.0, self.winfo_fpixels("1i") / 96.0)
         self._make_fonts(); self._make_styles()
         
-        # File Engine State
         self._file_path = self._file_bytes = self._file_text_exact = self._loaded_display = None
         self._file_is_bin = self._busy = self._rail_has_run = False
         self._enc = self._out = self._preview_job = None
@@ -451,18 +610,15 @@ class App(tk.Tk):
         
         self._build_header()
         
-        # Notebook for Tabs
         self.notebook = ttk.Notebook(self)
         self.notebook.grid(row=1, column=0, sticky="nsew", padx=self.px(10), pady=self.px(10))
         self.rowconfigure(1, weight=1)
         self.columnconfigure(0, weight=1)
         
-        # Tab 1: File/Text Cipher
         self.tab_file = tk.Frame(self.notebook, bg=C.BG)
         self.notebook.add(self.tab_file, text="File & Text Cipher (CL1-CL8)")
         self._build_file_tab(self.tab_file)
         
-        # Tab 2: Disk Provisioning
         self.tab_disk = tk.Frame(self.notebook, bg=C.BG)
         self.notebook.add(self.tab_disk, text="OEM Disk Provisioning (CL9)")
         self._build_disk_tab(self.tab_disk)
@@ -473,7 +629,6 @@ class App(tk.Tk):
         self.geometry(f"{min(w, sw - 40)}x{min(h, sh - 80)}+{(sw - min(w, sw - 40)) // 2}+{max(0, (sh - min(h, sh - 80)) // 3)}")
         self.minsize(self.px(1100), self.px(750))
         
-        # Global bindings
         self.bind("<Control-Return>", lambda e: self._start("encrypt") if self.notebook.index("current") == 0 else None)
         self.bind("<Control-Shift-Return>", lambda e: self._start("decrypt") if self.notebook.index("current") == 0 else None)
         self._input_changed()
@@ -547,7 +702,6 @@ class App(tk.Tk):
         right = tk.Frame(parent, bg=C.BG); right.grid(row=0, column=1, sticky="nsew", padx=(px(10), 0))
         right.rowconfigure(0, weight=1); right.columnconfigure(0, weight=1)
 
-        # Input
         card, tools, self.in_meta = self._card(left, "Input")
         card.grid(row=0, column=0, sticky="nsew")
         RButton(tools, self, "Open file…", self._open_file, "ghost", self.f_ui_b, padx=10, pady=4).pack(side="left")
@@ -561,12 +715,10 @@ class App(tk.Tk):
         self.ph.place(x=px(16), y=px(12)); self.ph.bind("<Button-1>", lambda e: self.input.focus_set())
         self.input.bind("<<Modified>>", self._on_modified)
 
-        # Actions
         row = tk.Frame(left, bg=C.BG); row.grid(row=1, column=0, sticky="ew", pady=px(12))
         self.btn_enc = RButton(row, self, "Encrypt", lambda: self._start("encrypt"), "primary", self.f_btn, parent_bg=C.BG, padx=34, pady=11, min_w=150); self.btn_enc.pack(side="left")
         self.btn_dec = RButton(row, self, "Decrypt", lambda: self._start("decrypt"), "secondary", self.f_btn, parent_bg=C.BG, padx=34, pady=11, min_w=150); self.btn_dec.pack(side="left", padx=(px(12), 0))
 
-        # Output
         card2, tools2, self.out_meta = self._card(left, "Output")
         card2.grid(row=2, column=0, sticky="nsew")
         self.btn_copy = RButton(tools2, self, "Copy", self._copy, "ghost", self.f_ui_b, padx=10, pady=4); self.btn_copy.pack(side="left")
@@ -579,7 +731,6 @@ class App(tk.Tk):
         sb2.configure(command=self.output.yview); self.output.bind("<Button-1>", lambda e: self.output.focus_set())
         self._set_output_text("The result appears here.", dim=True)
 
-        # Pipeline
         card3 = tk.Frame(right, bg=C.CARD, highlightbackground=C.BORDER, highlightcolor=C.BORDER, highlightthickness=1)
         card3.grid(row=0, column=0, sticky="nsew")
         head3 = tk.Frame(card3, bg=C.CARD); head3.pack(fill="x", padx=px(16), pady=(px(10), px(6)))
@@ -598,85 +749,156 @@ class App(tk.Tk):
     def _build_disk_tab(self, parent):
         px = self.px
         parent.rowconfigure(0, weight=1); parent.columnconfigure(0, weight=1)
-        
+
         container, _, _ = self._card(parent, "Split-Key Volume Provisioner (CL9)")
         container.grid(row=0, column=0, sticky="nsew", padx=px(20), pady=px(20))
-        
+
         main_content = tk.Frame(container, bg=C.CARD)
         main_content.pack(fill="both", expand=True, padx=px(20), pady=px(20))
-        
+
         left_col = tk.Frame(main_content, bg=C.CARD)
         left_col.pack(side="left", fill="y", padx=(0, px(30)))
-        
+
+        self._drive_q = queue.Queue()
+        self._drive_map = {}
+        self._current_plan = None
+
         tk.Label(left_col, text="Drive Selection", font=self.f_ui_b, bg=C.CARD, fg=C.INK).pack(anchor="w", pady=(0, px(5)))
-        self.cmb_drive = ttk.Combobox(left_col, state="readonly", width=30)
+        tk.Label(left_col, text="Only removable, non-system drives are listed.\nAmbiguous or internal drives are excluded.",
+                 font=self.f_small, bg=C.CARD, fg=C.INK_FAINT, justify="left").pack(anchor="w", pady=(0, px(6)))
+        self.cmb_drive = ttk.Combobox(left_col, state="readonly", width=34)
         self.cmb_drive.pack(anchor="w", pady=(0, px(10)))
-        
-        RButton(left_col, self, "Refresh Drives", self._update_drive_dropdown, "ghost", self.f_small, padx=10, pady=4).pack(anchor="w", pady=(0, px(20)))
+        self.cmb_drive.bind("<<ComboboxSelected>>", lambda e: self._reset_plan_state())
+
+        self.btn_refresh = RButton(left_col, self, "Refresh Drives", self._refresh_drives, "ghost", self.f_small, padx=10, pady=4)
+        self.btn_refresh.pack(anchor="w", pady=(0, px(20)))
 
         tk.Label(left_col, text="Target OEM Cipher", font=self.f_ui_b, bg=C.CARD, fg=C.INK).pack(anchor="w", pady=(0, px(5)))
         self.os_var = tk.StringVar(value="Windows")
-        tk.Radiobutton(left_col, text="Windows (BitLocker AES-XTS via .bek)", variable=self.os_var, value="Windows", bg=C.CARD, fg=C.INK, activebackground=C.CARD, selectcolor=C.CARD).pack(anchor="w")
-        tk.Radiobutton(left_col, text="Linux (LUKS2 AES-XTS via raw binary)", variable=self.os_var, value="Linux", bg=C.CARD, fg=C.INK, activebackground=C.CARD, selectcolor=C.CARD).pack(anchor="w")
+        for val, text in (("Windows", "Windows (BitLocker AES-XTS via .bek)"), ("Linux", "Linux (LUKS2 AES-XTS via raw binary)")):
+            tk.Radiobutton(left_col, text=text, variable=self.os_var, value=val, command=self._reset_plan_state,
+                           bg=C.CARD, fg=C.INK, activebackground=C.CARD, selectcolor=C.CARD).pack(anchor="w")
 
-        RButton(left_col, self, "Format + Encrypt Volume", self._provision_disk, "primary", self.f_btn, parent_bg=C.CARD, padx=20, pady=10).pack(anchor="w", pady=(px(40), 0))
-        
+        self.btn_preview = RButton(left_col, self, "Preview plan (dry run)", self._preview_plan, "secondary", self.f_btn, parent_bg=C.CARD, padx=16, pady=8)
+        self.btn_preview.pack(anchor="w", pady=(px(20), px(10)))
+
+        self.confirm_label = tk.Label(left_col, text="Preview a plan to see what to type here.", font=self.f_small,
+                                       bg=C.CARD, fg=C.INK_FAINT, wraplength=px(260), justify="left")
+        self.confirm_label.pack(anchor="w", pady=(px(4), px(2)))
+        self.confirm_entry = tk.Entry(left_col, font=self.f_mono_s, width=34, state="disabled")
+        self.confirm_entry.pack(anchor="w", pady=(0, px(10)))
+        self.confirm_entry.bind("<KeyRelease>", self._check_confirm)
+
+        self.btn_format = RButton(left_col, self, "Format + Encrypt Volume (dry run)", self._confirm_and_log, "primary", self.f_btn, parent_bg=C.CARD, padx=20, pady=10)
+        self.btn_format.pack(anchor="w")
+        self.btn_format.set_enabled(False)
+
         right_col = tk.Frame(main_content, bg=C.WELL)
         right_col.pack(side="right", fill="both", expand=True)
-        
+
         tk.Label(right_col, text="Provisioning Log", font=self.f_ui_b, bg=C.WELL, fg=C.WELL_FG).pack(anchor="w", padx=px(10), pady=px(10))
-        
+
         sb = ttk.Scrollbar(right_col, orient="vertical", style="Dark.Vertical.TScrollbar")
         sb.pack(side="right", fill="y")
         self.disk_log = tk.Text(right_col, font=self.f_mono, bg=C.WELL, fg=C.WELL_MINT, relief="flat", bd=0, wrap="word", padx=px(10), pady=px(10), yscrollcommand=sb.set, state="disabled")
         self.disk_log.pack(side="left", fill="both", expand=True)
         sb.configure(command=self.disk_log.yview)
 
-        self._update_drive_dropdown()
+        self._refresh_drives()
 
-    def _update_drive_dropdown(self):
-        drives = get_removable_drives()
-        self.cmb_drive["values"] = drives
-        if drives:
-            self.cmb_drive.set(drives[0])
-        else:
-            self.cmb_drive.set("No removable drives found")
+    def _reset_plan_state(self):
+        self._current_plan = None
+        self.confirm_entry.delete(0, "end")
+        self.confirm_entry.configure(state="disabled")
+        self.confirm_label.configure(text="Preview a plan to see what to type here.")
+        self.btn_format.set_enabled(False)
 
     def _log_disk(self, msg):
         self.disk_log.configure(state="normal")
         self.disk_log.insert("end", f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}\n")
         self.disk_log.see("end")
         self.disk_log.configure(state="disabled")
-        self.update_idletasks()
 
-    def _provision_disk(self):
-        selected = self.cmb_drive.get()
-        if not selected or selected == "No removable drives found":
-            messagebox.showerror("Error", "Please select a valid drive.")
-            return
-            
-        confirm = messagebox.askyesno("Destructive Operation", f"WARNING: This will securely wipe and encrypt {selected}.\n\nAll existing data will be destroyed.\n\nProceed?")
-        if not confirm: return
-        
-        os_target = self.os_var.get()
-        self._set_strategy_chip("CL9")
-        self._set_status("busy", f"Provisioning {selected} for {os_target}...")
-        
-        self.disk_log.configure(state="normal")
-        self.disk_log.delete("1.0", "end")
-        self.disk_log.configure(state="disabled")
-        
-        # Run provisioner in thread
-        threading.Thread(target=self._provision_worker, args=(selected, os_target), daemon=True).start()
+    def _refresh_drives(self):
+        self.btn_refresh.set_enabled(False)
+        self._log_disk("Scanning for candidate drives...")
 
-    def _provision_worker(self, drive, os_target):
+        def worker():
+            try:
+                drives = safe_candidates()
+                self._drive_q.put(("ok", drives))
+            except Exception as e:
+                self._drive_q.put(("err", str(e)))
+        threading.Thread(target=worker, daemon=True).start()
+        self.after(80, self._poll_drives)
+
+    def _poll_drives(self):
         try:
-            success = execute_disk_provisioning(drive, os_target, self._log_disk)
-            if success:
-                self.after(0, lambda: self._set_status("ok", f"Successfully provisioned split-key disk: {drive}"))
-        except Exception as e:
-            self.after(0, lambda: self._set_status("error", f"Provisioning failed: {str(e)}"))
-            self._log_disk(f"ERROR: {str(e)}")
+            kind, payload = self._drive_q.get_nowait()
+        except queue.Empty:
+            self.after(80, self._poll_drives)
+            return
+        self.btn_refresh.set_enabled(True)
+        if kind == "err":
+            self._log_disk(f"Drive detection failed closed (no drives offered): {payload}")
+            self.cmb_drive["values"] = []
+            self.cmb_drive.set("")
+            self._drive_map = {}
+            return
+        self._drive_map = {d.label(): d for d in payload}
+        self.cmb_drive["values"] = list(self._drive_map.keys())
+        if self._drive_map:
+            self.cmb_drive.current(0)
+            self._log_disk(f"Found {len(self._drive_map)} candidate drive(s).")
+        else:
+            self.cmb_drive.set("No safe candidate drives found")
+            self._log_disk("No removable, unmounted, non-system drives found.")
+        self._reset_plan_state()
+
+    def _preview_plan(self):
+        label = self.cmb_drive.get()
+        snapshot = self._drive_map.get(label)
+        if snapshot is None:
+            messagebox.showerror("CL9", "Select a drive from the list first.")
+            return
+        plan = plan_commands(snapshot, self.os_var.get())
+        self._current_plan = plan
+        self._set_strategy_chip("CL9")
+        self._log_disk(f"--- plan for {snapshot.device_path} ({self.os_var.get()}) ---")
+        for w in plan.warnings:
+            self._log_disk(w)
+        for c in plan.commands:
+            self._log_disk(f"  $ {c}")
+        if plan.commands:
+            self.confirm_label.configure(text=f"Type the exact device path to confirm: {snapshot.confirmation_token()}")
+            self.confirm_entry.configure(state="normal")
+            self.confirm_entry.delete(0, "end")
+            self.confirm_entry.focus_set()
+        else:
+            self.confirm_label.configure(text="This drive was refused - see the log. Nothing to confirm.")
+            self.confirm_entry.configure(state="disabled")
+        self.btn_format.set_enabled(False)
+
+    def _check_confirm(self, *_):
+        ok = bool(self._current_plan) and bool(self._current_plan.commands) and \
+             confirms(self._current_plan.snapshot, self.confirm_entry.get())
+        self.btn_format.set_enabled(ok)
+
+    def _confirm_and_log(self):
+        plan = self._current_plan
+        if not plan or not confirms(plan.snapshot, self.confirm_entry.get()):
+            return
+        try:
+            result = execute_plan(plan, self.confirm_entry.get(), dry_run=True)
+        except PermissionError as e:
+            self._log_disk(f"REFUSED: {e}")
+            self._set_status("error", str(e))
+            return
+        self._log_disk(f"DRY RUN confirmed for {plan.snapshot.device_path}. "
+                        f"Derived a {result['boot_key_bytes']}-byte boot key; "
+                        f"host token NOT written (dry run). Audit entry recorded.")
+        self._set_status("ok", f"Dry run confirmed for {plan.snapshot.device_path}. Nothing was written to the drive.")
+        self._reset_plan_state()
 
     # ── SHARED UTILITIES ──────────────────────────────────────────────────────
     def _draw_progress(self):
