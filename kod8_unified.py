@@ -184,7 +184,7 @@ def auto_detect(sample_or_path, is_file=False):
         ext = sample_or_path.lower().split(".")[-1]
         if ext in ("pdf", "docx", "doc", "txt", "xlsx", "pptx", "odt"): return "CL3"
         if ext in ("png", "jpg", "jpeg", "bmp", "webp", "gif", "svg"): return "CL4"
-        if ext in ("mp4", "mkv", "avi", "mov", "webm", "flv"): return "CL5"
+        if ext in ("mp4", "iso", "zip", "rar", "mkv", "avi", "mov", "webm", "flv"): return "CL5"
         return "CL6"
     return "CL1"
 
@@ -661,10 +661,10 @@ class App(tk.Tk):
         inner = tk.Frame(head, bg=C.HEADER); inner.pack(fill="x", padx=px(24), pady=px(14))
         mark = tk.Canvas(inner, width=px(14), height=px(14), bg=C.HEADER, highlightthickness=0)
         mark.create_rectangle(0, 0, px(14), px(14), fill=C.RED, outline=""); mark.pack(side="left", padx=(0, px(12)))
-        tk.Label(inner, text="KOD8 Unified Sandbox", font=self.f_mark, fg=C.HEADER_FG, bg=C.HEADER).pack(side="left")
+        tk.Label(inner, text="KOD8 Sandbox", font=self.f_mark, fg=C.HEADER_FG, bg=C.HEADER).pack(side="left")
         tk.Label(inner, text="Stock OEM Provisioning Suite", font=self.f_sub, fg=C.HEADER_DIM, bg=C.HEADER).pack(side="left", padx=(px(16), 0), pady=(px(3), 0))
         self.chip_key = Chip(inner, self, self.f_small, "Ready", C.GREEN); self.chip_key.pack(side="right")
-        self.chip_strategy = Chip(inner, self, self.f_small, "CL9 Native OEM", C.INK_FAINT); self.chip_strategy.pack(side="right", padx=(0, px(10)))
+        self.chip_strategy = Chip(inner, self, self.f_small, "Disk Encryption", C.INK_FAINT); self.chip_strategy.pack(side="right", padx=(0, px(10)))
 
     def _build_statusbar(self):
         px = self.px
